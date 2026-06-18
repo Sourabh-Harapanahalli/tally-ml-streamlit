@@ -1,0 +1,29 @@
+# Virtual environments (never commit these — huge & machine-specific)
+venv/
+venv_mac/
+.venv/
+**/venv/
+**/venv_mac/
+**/.venv/
+env/
+ENV/
+
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.Python
+
+# Django
+db.sqlite3
+db.sqlite3-journal
+
+# Generated output files (recreated at runtime)
+**/output*.xlsx
+**/data.xlsx
+
+# OS / editor cruft
+.DS_Store
+*.swp
+.idea/
+.vscode/

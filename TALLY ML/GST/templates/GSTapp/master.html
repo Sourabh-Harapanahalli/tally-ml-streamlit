@@ -1,0 +1,16 @@
+<!DOCTYPE html>
+{% extends "GSTapp/base.html" %}
+
+{% block content %}
+
+<li>
+    <a href="{% url 'view:master_ledger' %}">Master_Ledger</a>
+</li>
+<li>
+    <a href="{% url 'view:master_duties' %}">Master_Duties</a>
+</li>
+<li>
+    <a href="{% url 'view:master_ps' %}">Master_Purchase_Sales</a>
+</li>
+
+{% endblock %}

@@ -269,7 +269,7 @@ class Purchase_Sales(View):
             '12_IGST',
             '18_IGST',
             '28_IGST',
-            ]].sum(axis=1).round(2)
+            ]].apply(pd.to_numeric, errors='coerce').sum(axis=1).round(2)
 
 
             def replace_negatives(x):

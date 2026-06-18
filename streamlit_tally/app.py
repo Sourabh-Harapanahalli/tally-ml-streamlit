@@ -16,7 +16,9 @@ import io
 import os
 import sys
 
+import pandas as pd
 import streamlit as st
+from openpyxl import load_workbook
 
 # Must be the first Streamlit command in the script.
 st.set_page_config(page_title="TALLY ML", page_icon="📒", layout="centered")
@@ -141,6 +143,102 @@ def build_template(tool_name):
 
 
 # --------------------------------------------------------------------------
+# Example data for each converter. These are sample rows that show the
+# expected format. EXAMPLES fills the TEMPLATE sheet; EXAMPLE_AUX fills the
+# secondary sheet (only Purchase/Sales uses the ledger-name mapping sheet).
+# --------------------------------------------------------------------------
+EXAMPLES = {
+    "Purchase / Sales": [
+        {"Supplier_Invoice": "INV-001", "Datetime": "01/04/2024", "Vch_Type": "Purchase",
+         "PartyLedgerName": "ABC Traders", "Dr_LedgerName": "Purchase @ 18%",
+         "Total_Amount": 11800, "GST_18": 10000, "Narration": "Goods purchased - 18% GST (intra-state)"},
+        {"Supplier_Invoice": "INV-002", "Datetime": "02/04/2024", "Vch_Type": "Sales",
+         "PartyLedgerName": "XYZ Enterprises", "Dr_LedgerName": "Sales @ 12%",
+         "Total_Amount": 5600, "GST_12": 5000, "Narration": "Goods sold - 12% GST (intra-state)"},
+        {"Supplier_Invoice": "INV-003", "Datetime": "03/04/2024", "Vch_Type": "Sales",
+         "PartyLedgerName": "PQR Pvt Ltd", "Dr_LedgerName": "Sales @ 18% (IGST)",
+         "Total_Amount": 11800, "GST_18_IGST": 10000, "Narration": "Interstate sale - 18% IGST"},
+    ],
+    "Payment / Contra / Receipt": [
+        {"DATE_TIME": "01/04/2024", "PartyLedgerName": "ABC Traders", "Dr_LedgerName": "ABC Traders",
+         "Dr_Amount": 10000, "Cr_LedgerName": "HDFC Bank", "Cr_Amount": 10000,
+         "Narration": "Payment to supplier", "Vch_Type": "Payment"},
+        {"DATE_TIME": "02/04/2024", "PartyLedgerName": "XYZ Enterprises", "Dr_LedgerName": "HDFC Bank",
+         "Dr_Amount": 15000, "Cr_LedgerName": "XYZ Enterprises", "Cr_Amount": 15000,
+         "Narration": "Receipt from customer", "Vch_Type": "Receipt"},
+        {"DATE_TIME": "03/04/2024", "PartyLedgerName": "Cash", "Dr_LedgerName": "Cash",
+         "Dr_Amount": 5000, "Cr_LedgerName": "HDFC Bank", "Cr_Amount": 5000,
+         "Narration": "Cash withdrawn from bank", "Vch_Type": "Contra"},
+    ],
+    "Master — Ledger": [
+        {"Ledger_Name": "ABC Traders", "Alias": "ABC", "Group_Name": "Sundry Creditors",
+         "Country": "India", "State_Name": "Karnataka", "Pincode": "560001",
+         "Registration_Type": "Regular", "GST_NO": "29ABCDE1234F1Z5", "Opening_Balance": 0,
+         "Dr/Cr": "Cr", "Address": "123 MG Road, Bangalore"},
+        {"Ledger_Name": "XYZ Enterprises", "Alias": "XYZ", "Group_Name": "Sundry Debtors",
+         "Country": "India", "State_Name": "Maharashtra", "Pincode": "400001",
+         "Registration_Type": "Regular", "GST_NO": "27XYZAB5678G1Z3", "Opening_Balance": 25000,
+         "Dr/Cr": "Dr", "Address": "45 Marine Drive, Mumbai"},
+    ],
+    "Master — Duties & Taxes": [
+        {"Ledger_Name": "CGST", "Group_Name": "Duties & Taxes", "Rate_of_Tax": 9, "Tax_Type": "Central Tax"},
+        {"Ledger_Name": "SGST", "Group_Name": "Duties & Taxes", "Rate_of_Tax": 9, "Tax_Type": "State Tax"},
+        {"Ledger_Name": "IGST", "Group_Name": "Duties & Taxes", "Rate_of_Tax": 18, "Tax_Type": "Integrated Tax"},
+    ],
+    "Master — Purchase/Sales Ledgers": [
+        {"Ledger_Name": "Sales @ 18%", "Group_Name": "Sales Accounts",
+         "Nature_of_transaction": "Sales Taxable", "RATE_OF_CGST_SGST": 18, "RATE_OF_IGST": 18},
+        {"Ledger_Name": "Purchase @ 12%", "Group_Name": "Purchase Accounts",
+         "Nature_of_transaction": "Purchase Taxable", "RATE_OF_CGST_SGST": 12, "RATE_OF_IGST": 12},
+    ],
+}
+
+# Maps each GST column on the TEMPLATE sheet to a sample Tally ledger name on
+# the MASTER_LEDGER_NAME_LINK sheet (Purchase / Sales only).
+EXAMPLE_AUX = {
+    "Purchase / Sales": {
+        "sheet": "MASTER_LEDGER_NAME_LINK",
+        "values": {
+            "GST_5": "Purchase/Sales @ 5%", "GST_12": "Purchase/Sales @ 12%",
+            "GST_18": "Purchase/Sales @ 18%", "GST_28": "Purchase/Sales @ 28%",
+            "GST_5_IGST": "Purchase/Sales @ 5% (IGST)", "GST_12_IGST": "Purchase/Sales @ 12% (IGST)",
+            "GST_18_IGST": "Purchase/Sales @ 18% (IGST)", "GST_28_IGST": "Purchase/Sales @ 28% (IGST)",
+            "2.5_CGST": "CGST", "6_CGST": "CGST", "9_CGST": "CGST", "14_CGST": "CGST",
+            "2.5_SGST": "SGST", "6_SGST": "SGST", "9_SGST": "SGST", "14_SGST": "SGST",
+            "5_IGST": "IGST", "12_IGST": "IGST", "18_IGST": "IGST", "28_IGST": "IGST",
+        },
+    },
+}
+
+
+@st.cache_data(show_spinner=False)
+def build_example(tool_name):
+    """Return bytes of the blank template pre-filled with the example rows."""
+    wb = load_workbook(io.BytesIO(build_template(tool_name)))
+
+    # Fill the TEMPLATE sheet, matching each example value to its header.
+    ws = wb["TEMPLATE"]
+    headers = [cell.value for cell in ws[1]]
+    for r, row in enumerate(EXAMPLES[tool_name], start=2):
+        for header, value in row.items():
+            if header in headers:
+                ws.cell(row=r, column=headers.index(header) + 1, value=value)
+
+    # Fill the secondary mapping sheet, if this tool has one.
+    aux = EXAMPLE_AUX.get(tool_name)
+    if aux:
+        ws2 = wb[aux["sheet"]]
+        for r in range(2, ws2.max_row + 1):
+            key = ws2.cell(row=r, column=1).value
+            if key in aux["values"]:
+                ws2.cell(row=r, column=2, value=aux["values"][key])
+
+    out = io.BytesIO()
+    wb.save(out)
+    return out.getvalue()
+
+
+# --------------------------------------------------------------------------
 # UI
 # --------------------------------------------------------------------------
 st.sidebar.title("📒 TALLY ML")
@@ -163,6 +261,26 @@ try:
     )
 except Exception as exc:  # noqa: BLE001
     st.error(f"Could not generate template: {exc}")
+
+# ---- Example: show & download a pre-filled template --------------------
+with st.expander("👀 See an example (filled template)"):
+    st.caption(
+        "Sample rows showing the expected format. Use these as a guide, then "
+        "replace them with your own data in the blank template above."
+    )
+    example_rows = EXAMPLES.get(tool_name)
+    if example_rows:
+        st.dataframe(pd.DataFrame(example_rows), use_container_width=True, hide_index=True)
+        try:
+            st.download_button(
+                label=f"⬇️ Download filled example — {tool['template_name']}",
+                data=build_example(tool_name),
+                file_name=f"EXAMPLE_{tool['template_name']}",
+                mime=XLSX_MIME,
+                key=f"example_{tool['upload_key']}",
+            )
+        except Exception as exc:  # noqa: BLE001
+            st.warning(f"Could not generate the example file: {exc}")
 
 st.divider()
 

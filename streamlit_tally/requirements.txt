@@ -1,10 +1,8 @@
-streamlit==1.39.0
-Django==5.0.6
-pandas==2.2.2
-numpy==2.0.0
-openpyxl==3.1.5
-XlsxWriter==3.2.0
-et-xmlfile==1.1.0
-python-dateutil==2.9.0.post0
-pytz==2024.1
-six==1.16.0
+# Loosened pins so prebuilt wheels are used (no source builds) across
+# Python 3.11 / 3.12 / 3.13. Keep pandas < 3 to preserve current behavior.
+streamlit>=1.39,<2
+Django>=5.0,<5.3
+pandas>=2.2,<3
+numpy>=1.26,<3
+openpyxl>=3.1
+XlsxWriter>=3.2

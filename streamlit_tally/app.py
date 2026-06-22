@@ -12,8 +12,10 @@ just imports its view functions.
 Run:  streamlit run app.py
 """
 
+import html
 import io
 import os
+import re
 import sys
 
 import pandas as pd
@@ -239,11 +241,164 @@ def build_example(tool_name):
 
 
 # --------------------------------------------------------------------------
+# Reverse direction: Tally "All Masters" XML export  ->  Master-Ledger Excel.
+#
+# This mirrors the Master_Ledger view in reverse: it reads each <LEDGER> block
+# from a Tally export and emits the same columns the Master — Ledger template
+# uses (Ledger_Name, Alias, Group_Name, Country, State_Name, Pincode,
+# Registration_Type, GST_NO, Opening_Balance, Dr/Cr, Address).
+# --------------------------------------------------------------------------
+MASTER_XML_TOOL = "Master XML → Excel (reverse)"
+
+# Column order must match the Master — Ledger TEMPLATE sheet.
+LEDGER_COLUMNS = [
+    "Ledger_Name", "Alias", "Group_Name", "Country", "State_Name", "Pincode",
+    "Registration_Type", "GST_NO", "Opening_Balance", "Dr/Cr", "Address",
+]
+
+
+def _tag_text(block, tag):
+    """Return the unescaped, trimmed text of the first <tag>…</tag> in block."""
+    m = re.search(r"<" + tag + r">(.*?)</" + tag + r">", block, re.S)
+    return html.unescape(m.group(1)).strip() if m else ""
+
+
+def parse_master_ledgers(xml_text):
+    """Parse every <LEDGER> in a Tally All-Masters export into ledger rows."""
+    rows = []
+    for block in re.findall(r"<LEDGER\b.*?</LEDGER>", xml_text, re.S):
+        m = re.search(r'<LEDGER\s+NAME="(.*?)"', block, re.S)
+        name = html.unescape(m.group(1)).strip() if m else ""
+
+        # Alias = 2nd <NAME> in LANGUAGENAME.LIST, when distinct from the name.
+        names = [html.unescape(n).strip()
+                 for n in re.findall(r"<NAME>(.*?)</NAME>", block, re.S)]
+        alias = names[1] if len(names) >= 2 and names[1] and names[1] != names[0] else ""
+
+        # Address = all <ADDRESS> lines inside ADDRESS.LIST, joined.
+        addr = ""
+        am = re.search(r"<ADDRESS\.LIST.*?</ADDRESS\.LIST>", block, re.S)
+        if am:
+            parts = [html.unescape(a).strip()
+                     for a in re.findall(r"<ADDRESS>(.*?)</ADDRESS>", am.group(0), re.S)]
+            addr = ", ".join(p for p in parts if p)
+
+        state = (_tag_text(block, "LEDSTATENAME")
+                 or _tag_text(block, "STATENAME")
+                 or _tag_text(block, "PRIORSTATENAME"))
+
+        # Opening balance: Tally stores Dr as negative, Cr as positive (this is
+        # the inverse of the Dr/Cr -> sign mapping in the Master_Ledger view).
+        ob_raw = _tag_text(block, "OPENINGBALANCE")
+        opening, drcr = "", ""
+        if ob_raw:
+            try:
+                v = float(ob_raw)
+                if v != 0:
+                    opening = abs(v)
+                    drcr = "Dr" if v < 0 else "Cr"
+            except ValueError:
+                pass
+
+        rows.append({
+            "Ledger_Name": name,
+            "Alias": alias,
+            "Group_Name": _tag_text(block, "PARENT"),
+            "Country": _tag_text(block, "COUNTRYNAME"),
+            "State_Name": state,
+            "Pincode": _tag_text(block, "PINCODE"),
+            "Registration_Type": _tag_text(block, "GSTREGISTRATIONTYPE"),
+            "GST_NO": _tag_text(block, "PARTYGSTIN"),
+            "Opening_Balance": opening,
+            "Dr/Cr": drcr,
+            "Address": addr,
+        })
+    return rows
+
+
+def read_tally_xml(raw_bytes):
+    """Decode a Tally XML export, which is usually UTF-16, sometimes UTF-8."""
+    for encoding in ("utf-16", "utf-8-sig", "utf-8", "latin-1"):
+        try:
+            return raw_bytes.decode(encoding)
+        except (UnicodeDecodeError, UnicodeError):
+            continue
+    return raw_bytes.decode("utf-8", errors="replace")
+
+
+def ledgers_to_excel(rows):
+    """Write ledger rows into the Master — Ledger template workbook (bytes)."""
+    wb = load_workbook(io.BytesIO(build_template("Master — Ledger")))
+    ws = wb["TEMPLATE"]
+
+    # Clear any rows below the header, then write parsed data.
+    if ws.max_row > 1:
+        ws.delete_rows(2, ws.max_row - 1)
+    headers = [cell.value for cell in ws[1]]
+    for r, row in enumerate(rows, start=2):
+        for header, value in row.items():
+            if header in headers:
+                ws.cell(row=r, column=headers.index(header) + 1, value=value)
+
+    out = io.BytesIO()
+    wb.save(out)
+    return out.getvalue()
+
+
+# --------------------------------------------------------------------------
 # UI
 # --------------------------------------------------------------------------
 st.sidebar.title("📒 TALLY ML")
 st.sidebar.caption("Excel → Tally XML converter")
-tool_name = st.sidebar.radio("Choose a converter", list(TOOLS.keys()))
+tool_name = st.sidebar.radio("Choose a converter", list(TOOLS.keys()) + [MASTER_XML_TOOL])
+
+# ==========================================================================
+# Reverse tool: Tally Master XML  ->  Master-Ledger Excel.
+# ==========================================================================
+if tool_name == MASTER_XML_TOOL:
+    st.title(MASTER_XML_TOOL)
+    st.info(
+        "Upload a Tally **All Masters** XML export (e.g. `Master.xml`). Each "
+        "ledger is extracted into the **Master — Ledger** Excel format "
+        "(Ledger_Name, Alias, Group_Name, Country, State_Name, Pincode, "
+        "Registration_Type, GST_NO, Opening_Balance, Dr/Cr, Address)."
+    )
+
+    st.subheader("Upload your Tally Master XML")
+    xml_file = st.file_uploader(
+        "Upload the Tally All-Masters XML export",
+        type=["xml"],
+        key="uploader_master_xml",
+    )
+
+    if xml_file is not None:
+        with st.spinner("Parsing ledgers…"):
+            try:
+                xml_text = read_tally_xml(xml_file.getvalue())
+                rows = parse_master_ledgers(xml_text)
+
+                if not rows:
+                    st.error(
+                        "No <LEDGER> records were found. Make sure this is a "
+                        "Tally 'All Masters' XML export."
+                    )
+                else:
+                    st.success(f"Done! Found {len(rows)} ledger(s).")
+                    df = pd.DataFrame(rows, columns=LEDGER_COLUMNS)
+                    st.dataframe(df, use_container_width=True, hide_index=True)
+
+                    st.download_button(
+                        "⬇️ Download Excel (Master — Ledger format)",
+                        data=ledgers_to_excel(rows),
+                        file_name="Master_Ledger_from_XML.xlsx",
+                        mime=XLSX_MIME,
+                    )
+            except Exception as exc:  # noqa: BLE001
+                st.error(f"Conversion failed: {exc}")
+                st.exception(exc)
+
+    st.stop()
+
 tool = TOOLS[tool_name]
 
 st.title(tool_name)

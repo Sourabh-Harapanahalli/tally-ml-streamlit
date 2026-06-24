@@ -367,6 +367,40 @@ def find_duplicate_gst(file_bytes):
     return df, dup_mask, dup_values
 
 
+# Columns that are mandatory when a ledger's registration type is "Regular".
+REGULAR_REQUIRED_FIELDS = ["GST_NO", "Country", "State_Name"]
+
+
+def find_missing_regular_fields(df):
+    """Flag rows where Registration_Type is Regular but required fields are blank.
+
+    Returns (row_mask, detail_df) where row_mask marks the offending rows and
+    detail_df lists each offending ledger with the fields it is missing.
+    """
+    if df is None or "Registration_Type" not in df.columns:
+        return None, None
+
+    reg = df["Registration_Type"].astype(str).str.strip().str.lower() == "regular"
+    present = {f: df[f].astype(str).str.strip() != "" if f in df.columns
+               else pd.Series(False, index=df.index)
+               for f in REGULAR_REQUIRED_FIELDS}
+
+    row_mask = pd.Series(False, index=df.index)
+    records = []
+    for idx in df.index[reg]:
+        missing = [f for f in REGULAR_REQUIRED_FIELDS if not present[f][idx]]
+        if missing:
+            row_mask[idx] = True
+            name = df.at[idx, "Ledger_Name"] if "Ledger_Name" in df.columns else ""
+            records.append({
+                "Row": int(idx) + 2,  # +2: 1-based + header row
+                "Ledger_Name": name,
+                "Missing_Fields": ", ".join(missing),
+            })
+    detail_df = pd.DataFrame(records) if records else None
+    return row_mask, detail_df
+
+
 # --------------------------------------------------------------------------
 # UI
 # --------------------------------------------------------------------------
@@ -485,7 +519,9 @@ uploaded = st.file_uploader(
 )
 
 if uploaded is not None:
-    # ---- Validation (Master — Ledger): warn on duplicate GST numbers ----
+    block_conversion = False
+
+    # ---- Validation (Master — Ledger) ----------------------------------
     if tool_name == "Master — Ledger":
         try:
             val_df, dup_mask, dup_values = find_duplicate_gst(uploaded.getvalue())
@@ -493,6 +529,7 @@ if uploaded is not None:
             val_df, dup_mask, dup_values = None, None, []
             st.warning(f"Could not run GST validation: {exc}")
 
+        # (a) Duplicate GST numbers — warning only (does not block).
         if dup_values:
             st.warning(
                 f"⚠️ Found **{len(dup_values)}** duplicate GST number(s) across "
@@ -512,6 +549,34 @@ if uploaded is not None:
             st.dataframe(styled, use_container_width=True)
         elif val_df is not None:
             st.success("✅ No duplicate GST numbers found.")
+
+        # (b) Regular ledgers must have GST_NO, Country and State_Name — blocks.
+        reg_mask, reg_detail = find_missing_regular_fields(val_df)
+        if reg_detail is not None:
+            block_conversion = True
+            st.error(
+                f"🚫 **{len(reg_detail)}** ledger(s) have **Registration_Type = "
+                "Regular** but are missing required field(s). For Regular "
+                "ledgers, **GST_NO**, **Country** and **State_Name** are "
+                "mandatory. Fix the rows below, then re-upload."
+            )
+            missing_cols = ["GST_NO", "Country", "State_Name"]
+            bad_rows = val_df[reg_mask]
+            styled_missing = bad_rows.style.apply(
+                lambda col: [
+                    "background-color: #ffd6d6" if (col.name in missing_cols
+                                                    and str(v).strip() == "")
+                    else "" for v in col
+                ],
+                axis=0,
+            )
+            st.dataframe(styled_missing, use_container_width=True)
+            st.markdown("**Rows needing attention:**")
+            st.dataframe(reg_detail, use_container_width=True, hide_index=True)
+
+    if block_conversion:
+        st.info("Conversion is paused until the errors above are resolved.")
+        st.stop()
 
     with st.spinner("Converting to Tally XML…"):
         try:

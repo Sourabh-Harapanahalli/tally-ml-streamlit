@@ -364,7 +364,22 @@ if tool_name == MASTER_XML_TOOL:
         "Registration_Type, GST_NO, Opening_Balance, Dr/Cr, Address)."
     )
 
-    st.subheader("Upload your Tally Master XML")
+    st.subheader("Step 1 — Export your masters from Tally as XML")
+    st.markdown(
+        """
+1. In Tally, navigate to **Display**.
+2. Open **List of Accounts**.
+3. Press **Alt + E** to **Export**.
+4. Change the **Format** to **XML**.
+5. Check the **output file location** (note the folder where the file is saved).
+6. Click **Export**.
+7. **Upload the XML file** below.
+"""
+    )
+
+    st.divider()
+
+    st.subheader("Step 2 — Upload your Tally Master XML")
     xml_file = st.file_uploader(
         "Upload the Tally All-Masters XML export",
         type=["xml"],

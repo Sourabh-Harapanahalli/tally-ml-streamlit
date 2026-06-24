@@ -412,43 +412,22 @@ def find_missing_regular_fields(df):
 # --------------------------------------------------------------------------
 ODBC_TOOL = "Tally ODBC — Live Data"
 
-# Preset Tally collections. Each holds:
-#   sql    — Tally's SQL dialect (used by the ODBC method); $fields, FROM <type>
-#   type   — the Tally collection TYPE (used by the HTTP/XML method)
-#   fields — the field names to fetch over HTTP (no "$" prefix)
+# Preset Tally collections, as Tally-dialect SQL ($field names, FROM <type>).
+# The Ledgers query mirrors every column in the Master — Ledger Excel template
+# (Ledger_Name, Alias, Group_Name, Country, State_Name, Pincode,
+# Registration_Type, GST_NO, Opening_Balance, Address). Dr/Cr is not a stored
+# field — it is the sign of the opening balance — so it is omitted here.
 ODBC_PRESETS = {
-    "Ledgers": {
-        "sql": "SELECT $Name, $Parent, $OpeningBalance, $ClosingBalance, "
-               "$LedStateName, $PartyGSTIN, $GSTRegistrationType FROM Ledger",
-        "type": "Ledger",
-        "fields": ["Name", "Parent", "OpeningBalance", "ClosingBalance",
-                   "LedStateName", "PartyGSTIN", "GSTRegistrationType"],
-    },
-    "Groups": {
-        "sql": "SELECT $Name, $Parent FROM Group",
-        "type": "Group", "fields": ["Name", "Parent"],
-    },
-    "Stock Items": {
-        "sql": "SELECT $Name, $Parent, $BaseUnits, $ClosingBalance, "
-               "$ClosingValue FROM StockItem",
-        "type": "StockItem",
-        "fields": ["Name", "Parent", "BaseUnits", "ClosingBalance", "ClosingValue"],
-    },
-    "Cost Centres": {
-        "sql": "SELECT $Name, $Parent FROM CostCentre",
-        "type": "CostCentre", "fields": ["Name", "Parent"],
-    },
-    "Voucher Types": {
-        "sql": "SELECT $Name, $Parent, $NumberingMethod FROM VoucherType",
-        "type": "VoucherType", "fields": ["Name", "Parent", "NumberingMethod"],
-    },
-    "Vouchers": {
-        "sql": "SELECT $Date, $VoucherTypeName, $VoucherNumber, "
-               "$PartyLedgerName, $Amount FROM Voucher",
-        "type": "Voucher",
-        "fields": ["Date", "VoucherTypeName", "VoucherNumber",
-                   "PartyLedgerName", "Amount"],
-    },
+    "Ledgers": "SELECT $Name, $Alias, $Parent, $CountryName, $LedStateName, "
+               "$PinCode, $GSTRegistrationType, $PartyGSTIN, $OpeningBalance, "
+               "$ClosingBalance, $Address FROM Ledger",
+    "Groups": "SELECT $Name, $Parent FROM Group",
+    "Stock Items": "SELECT $Name, $Parent, $BaseUnits, $ClosingBalance, "
+                   "$ClosingValue FROM StockItem",
+    "Cost Centres": "SELECT $Name, $Parent FROM CostCentre",
+    "Voucher Types": "SELECT $Name, $Parent, $NumberingMethod FROM VoucherType",
+    "Vouchers": "SELECT $Date, $VoucherTypeName, $VoucherNumber, "
+                "$PartyLedgerName, $Amount FROM Voucher",
 }
 
 
@@ -484,60 +463,6 @@ def run_odbc_query(conn_str, sql):
         conn.close()
 
 
-def run_http_collection(host, port, coll_type, fields, timeout=20):
-    """Fetch a Tally collection over the HTTP/XML gateway (no ODBC driver).
-
-    Tally serves an XML gateway on the same port as ODBC. We POST a Collection
-    export request and parse the returned objects into a DataFrame. This needs
-    no driver and no DSN, so it sidesteps ODBC bitness/driver-name problems.
-    """
-    import urllib.request
-    import xml.etree.ElementTree as ET
-
-    methods = "".join(f"<NATIVEMETHOD>{f}</NATIVEMETHOD>" for f in fields)
-    envelope = (
-        "<ENVELOPE>"
-        "<HEADER><VERSION>1</VERSION><TALLYREQUEST>Export</TALLYREQUEST>"
-        "<TYPE>Collection</TYPE><ID>TallyMLColl</ID></HEADER>"
-        "<BODY><DESC><STATICVARIABLES>"
-        "<SVEXPORTFORMAT>$$SysName:XML</SVEXPORTFORMAT>"
-        "</STATICVARIABLES><TDL><TDLMESSAGE>"
-        f'<COLLECTION NAME="TallyMLColl" ISMODIFY="No">'
-        f"<TYPE>{coll_type}</TYPE>{methods}</COLLECTION>"
-        "</TDLMESSAGE></TDL></DESC></BODY></ENVELOPE>"
-    )
-
-    req = urllib.request.Request(
-        f"http://{host}:{port}",
-        data=envelope.encode("utf-8"),
-        headers={"Content-Type": "text/xml; charset=utf-8"},
-    )
-    with urllib.request.urlopen(req, timeout=timeout) as resp:
-        raw = resp.read()
-
-    text = read_tally_xml(raw)
-    # Tally responses sometimes contain stray control chars; drop them.
-    text = re.sub(r"[\x00-\x08\x0b\x0c\x0e-\x1f]", "", text)
-
-    root = ET.fromstring(text)
-    coll = root.find(".//COLLECTION")
-    if coll is None:
-        # Surface any Tally <LINEERROR>/<DESC> message if present.
-        err = root.find(".//LINEERROR")
-        if err is not None and err.text:
-            raise RuntimeError(err.text.strip())
-        return pd.DataFrame(columns=fields)
-
-    records = []
-    for obj in list(coll):  # each direct child is one record (e.g. <LEDGER>)
-        row = {}
-        for field in fields:
-            child = obj.find(field.upper())
-            row[field] = child.text.strip() if child is not None and child.text else ""
-        records.append(row)
-    return pd.DataFrame.from_records(records, columns=fields)
-
-
 # --------------------------------------------------------------------------
 # UI
 # --------------------------------------------------------------------------
@@ -552,41 +477,24 @@ tool_name = st.sidebar.radio(
 if tool_name == ODBC_TOOL:
     st.title(ODBC_TOOL)
     st.info(
-        "Connect to a **running Tally** instance and view its data live in this "
-        "dashboard. This works only when the app runs on the same machine as "
-        "Tally (or one that can reach Tally's port 9000)."
+        "Connect to a **running Tally** instance over its ODBC server and view "
+        "the data live in this dashboard. This works only when the app runs on "
+        "the same machine as Tally (with the Tally ODBC driver installed)."
     )
 
-    with st.expander("ℹ️ How to enable connectivity in Tally", expanded=False):
+    with st.expander("ℹ️ How to enable ODBC in Tally", expanded=False):
         st.markdown(
             """
 1. Open **Tally** (TallyPrime / Tally.ERP 9) and load your company.
 2. Go to **F1: Help → Settings → Connectivity** (or **F12: Configure → Advanced**).
 3. Set **ODBC Server** to **Yes** and note the **port** (default **9000**).
-   This also enables the HTTP/XML gateway on the same port.
 4. Keep Tally open while you use this section.
+5. `pip install pyodbc` if it isn't already available.
 
-**Two ways to connect below:**
-- **HTTP (XML gateway)** — *recommended.* Needs no driver and no `pyodbc`;
-  it just talks to `http://host:9000`. Avoids all ODBC driver/bitness issues.
-- **ODBC** — needs the Tally ODBC driver installed and `pip install pyodbc`.
+If you see **“HY000 — the driver did not supply an error”**, it's usually a
+wrong **driver name** or a **32-bit/64-bit mismatch** — use *List installed
+ODBC drivers* below to find the exact name.
 """
-        )
-
-    method = st.radio("Connection method",
-                      ["HTTP (XML gateway) — recommended", "ODBC (pyodbc)"],
-                      key="conn_method")
-    use_http = method.startswith("HTTP")
-
-    # ---- ODBC troubleshooting note -------------------------------------
-    if not use_http:
-        st.warning(
-            "If you saw **“HY000 — the driver did not supply an error”**, it's "
-            "almost always (1) the **driver name doesn't match** what's "
-            "installed, or (2) a **32-bit vs 64-bit mismatch** between Python "
-            "and the Tally ODBC driver. Use *List installed ODBC drivers* below "
-            "to find the exact name, or switch to the **HTTP** method which "
-            "needs no driver."
         )
 
     st.subheader("Step 1 — Connect")
@@ -594,50 +502,44 @@ if tool_name == ODBC_TOOL:
     host = col_a.text_input("Host", value="localhost", key="tally_host")
     port = col_b.number_input("Port", value=9000, step=1, key="tally_port")
 
-    # ODBC-only inputs.
-    conn_str = None
-    if not use_http:
-        if st.button("🔍 List installed ODBC drivers"):
-            try:
-                drivers = list_odbc_drivers()
-                if drivers:
-                    st.write("Installed ODBC drivers on this machine:")
-                    st.code("\n".join(drivers))
-                    tally_like = [d for d in drivers if "tally" in d.lower()]
-                    if tally_like:
-                        st.success("Tally driver(s) found: " +
-                                   ", ".join(f"`{d}`" for d in tally_like) +
-                                   " — copy the exact name into the field below.")
-                    else:
-                        st.warning(
-                            "No Tally driver found. Install the Tally ODBC driver "
-                            "matching your Python bitness, or use HTTP."
-                        )
+    if st.button("🔍 List installed ODBC drivers"):
+        try:
+            drivers = list_odbc_drivers()
+            if drivers:
+                st.write("Installed ODBC drivers on this machine:")
+                st.code("\n".join(drivers))
+                tally_like = [d for d in drivers if "tally" in d.lower()]
+                if tally_like:
+                    st.success("Tally driver(s) found: " +
+                               ", ".join(f"`{d}`" for d in tally_like) +
+                               " — copy the exact name into the field below.")
                 else:
-                    st.warning("No ODBC drivers are registered on this machine.")
-            except ImportError:
-                st.error("`pyodbc` is not installed. Run `pip install pyodbc`.")
-            except Exception as exc:  # noqa: BLE001
-                st.error(f"Could not list drivers: {exc}")
+                    st.warning(
+                        "No Tally driver found. Install the Tally ODBC driver "
+                        "matching your Python bitness."
+                    )
+            else:
+                st.warning("No ODBC drivers are registered on this machine.")
+        except ImportError:
+            st.error("`pyodbc` is not installed. Run `pip install pyodbc`.")
+        except Exception as exc:  # noqa: BLE001
+            st.error(f"Could not list drivers: {exc}")
 
-        odbc_mode = st.radio("ODBC connection style", ["DSN", "Driver name"],
-                             horizontal=True, key="odbc_mode")
-        if odbc_mode == "DSN":
-            dsn = st.text_input("ODBC DSN name", value="TallyODBC64_9000",
-                                key="odbc_dsn")
-            conn_str = build_odbc_conn_str("DSN", dsn, "", host, int(port))
-        else:
-            driver = st.text_input("Driver name (exact)",
-                                   value="Tally ODBC Driver64", key="odbc_driver")
-            conn_str = build_odbc_conn_str("Driver", "", driver, host, int(port))
-        st.caption(f"Connection string: `{conn_str}`")
+    odbc_mode = st.radio("ODBC connection style", ["DSN", "Driver name"],
+                         horizontal=True, key="odbc_mode")
+    if odbc_mode == "DSN":
+        dsn = st.text_input("ODBC DSN name", value="TallyODBC64_9000",
+                            key="odbc_dsn")
+        conn_str = build_odbc_conn_str("DSN", dsn, "", host, int(port))
+    else:
+        driver = st.text_input("Driver name (exact)",
+                               value="Tally ODBC Driver64", key="odbc_driver")
+        conn_str = build_odbc_conn_str("Driver", "", driver, host, int(port))
+    st.caption(f"Connection string: `{conn_str}`")
 
     if st.button("🔌 Test connection"):
         try:
-            if use_http:
-                df = run_http_collection(host, int(port), "Company", ["Name"])
-            else:
-                df = run_odbc_query(conn_str, "SELECT $Name FROM Company")
+            df = run_odbc_query(conn_str, "SELECT $Name FROM Company")
             names = [str(v) for v in df.iloc[:, 0].tolist()] if not df.empty else []
             st.success(f"Connected. Open compan(y/ies): {', '.join(names) or '—'}")
         except ImportError:
@@ -645,8 +547,8 @@ if tool_name == ODBC_TOOL:
         except Exception as exc:  # noqa: BLE001
             st.error(f"Could not connect: {exc}")
             st.caption(
-                "Check that Tally is open with ODBC/connectivity enabled and the "
-                "port matches. For ODBC, confirm the driver name and bitness."
+                "Check that Tally is open with ODBC enabled and the port "
+                "matches. Confirm the driver name / DSN and bitness."
             )
 
     st.divider()
@@ -654,24 +556,13 @@ if tool_name == ODBC_TOOL:
     # ---- Browse data ----------------------------------------------------
     st.subheader("Step 2 — Browse data")
     preset = st.selectbox("Pick a collection", list(ODBC_PRESETS.keys()))
-    cfg = ODBC_PRESETS[preset]
-
-    if not use_http:
-        sql = st.text_area("SQL query (Tally dialect)", value=cfg["sql"],
-                           height=100, key=f"odbc_sql_{preset}")
-    else:
-        st.caption(f"Collection type: `{cfg['type']}` — fields: " +
-                   ", ".join(f"`{f}`" for f in cfg["fields"]))
+    sql = st.text_area("SQL query (Tally dialect)", value=ODBC_PRESETS[preset],
+                       height=100, key=f"odbc_sql_{preset}")
 
     if st.button("▶️ Run query", type="primary"):
         with st.spinner("Querying Tally…"):
             try:
-                if use_http:
-                    df = run_http_collection(host, int(port), cfg["type"],
-                                             cfg["fields"])
-                else:
-                    df = run_odbc_query(conn_str, sql)
-
+                df = run_odbc_query(conn_str, sql)
                 if df.empty:
                     st.warning("Query ran but returned no rows.")
                 else:

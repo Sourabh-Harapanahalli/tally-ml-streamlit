@@ -346,6 +346,28 @@ def ledgers_to_excel(rows):
 
 
 # --------------------------------------------------------------------------
+# Validation: the Master — Ledger sheet must not contain duplicate GST numbers.
+# --------------------------------------------------------------------------
+def find_duplicate_gst(file_bytes):
+    """Read the TEMPLATE sheet and locate duplicate GST_NO values.
+
+    Returns (dataframe, duplicate_mask, duplicate_values). The mask is a
+    boolean Series over the rows flagged as duplicate GST numbers; blank GST
+    numbers are ignored. Returns (None, None, []) if there's no GST_NO column.
+    """
+    df = pd.read_excel(io.BytesIO(file_bytes), sheet_name="TEMPLATE").fillna("")
+    if "GST_NO" not in df.columns:
+        return None, None, []
+
+    # Normalise for comparison (trim + uppercase) without mutating the data.
+    norm = df["GST_NO"].astype(str).str.strip().str.upper()
+    non_blank = norm != ""
+    dup_mask = norm.duplicated(keep=False) & non_blank
+    dup_values = sorted(norm[dup_mask].unique())
+    return df, dup_mask, dup_values
+
+
+# --------------------------------------------------------------------------
 # UI
 # --------------------------------------------------------------------------
 st.sidebar.title("📒 TALLY ML")
@@ -463,6 +485,34 @@ uploaded = st.file_uploader(
 )
 
 if uploaded is not None:
+    # ---- Validation (Master — Ledger): warn on duplicate GST numbers ----
+    if tool_name == "Master — Ledger":
+        try:
+            val_df, dup_mask, dup_values = find_duplicate_gst(uploaded.getvalue())
+        except Exception as exc:  # noqa: BLE001
+            val_df, dup_mask, dup_values = None, None, []
+            st.warning(f"Could not run GST validation: {exc}")
+
+        if dup_values:
+            st.warning(
+                f"⚠️ Found **{len(dup_values)}** duplicate GST number(s) across "
+                f"**{int(dup_mask.sum())}** row(s). Each GST number should be "
+                "unique. The duplicate rows are highlighted below — review them "
+                "before converting."
+            )
+            st.markdown("**Duplicate GST numbers:** " +
+                        ", ".join(f"`{g}`" for g in dup_values))
+
+            dup_rows = val_df[dup_mask]
+            styled = dup_rows.style.apply(
+                lambda col: ["background-color: #ffd6d6"] * len(col)
+                if col.name == "GST_NO" else [""] * len(col),
+                axis=0,
+            )
+            st.dataframe(styled, use_container_width=True)
+        elif val_df is not None:
+            st.success("✅ No duplicate GST numbers found.")
+
     with st.spinner("Converting to Tally XML…"):
         try:
             # Hand the view a fresh, seekable copy of the bytes under the

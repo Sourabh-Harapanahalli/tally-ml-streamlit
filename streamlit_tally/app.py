@@ -463,6 +463,26 @@ def run_odbc_query(conn_str, sql):
         conn.close()
 
 
+def list_collection_columns(conn_str, table):
+    """Return the available column names for a Tally collection (no data).
+
+    Uses the ODBC metadata call cursor.columns(); falls back to reading the
+    cursor description of a 'SELECT * FROM <table>' if metadata is empty.
+    """
+    import pyodbc  # lazy: optional dependency
+
+    conn = pyodbc.connect(conn_str, autocommit=True, timeout=10)
+    try:
+        cursor = conn.cursor()
+        cols = [row.column_name for row in cursor.columns(table=table)]
+        if not cols:
+            cursor.execute(f"SELECT * FROM {table}")
+            cols = [d[0] for d in cursor.description] if cursor.description else []
+        return cols
+    finally:
+        conn.close()
+
+
 # --------------------------------------------------------------------------
 # UI
 # --------------------------------------------------------------------------
@@ -556,6 +576,22 @@ ODBC drivers* below to find the exact name.
     # ---- Browse data ----------------------------------------------------
     st.subheader("Step 2 — Browse data")
     preset = st.selectbox("Pick a collection", list(ODBC_PRESETS.keys()))
+
+    # Table name = the word after FROM in the preset SQL (Ledger, Group, …).
+    table = ODBC_PRESETS[preset].split("FROM")[-1].strip().split()[0]
+    if st.button(f"🧾 Show available columns for {table}"):
+        try:
+            cols = list_collection_columns(conn_str, table)
+            if cols:
+                st.write(f"{len(cols)} column(s) available on `{table}`:")
+                st.code(", ".join(cols))
+            else:
+                st.warning("The driver returned no column metadata for this table.")
+        except ImportError:
+            st.error("`pyodbc` is not installed. Run `pip install pyodbc`.")
+        except Exception as exc:  # noqa: BLE001
+            st.error(f"Could not list columns: {exc}")
+
     sql = st.text_area("SQL query (Tally dialect)", value=ODBC_PRESETS[preset],
                        height=100, key=f"odbc_sql_{preset}")
 

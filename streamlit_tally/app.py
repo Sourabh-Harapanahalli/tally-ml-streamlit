@@ -402,11 +402,163 @@ def find_missing_regular_fields(df):
 
 
 # --------------------------------------------------------------------------
+# Live data: connect to a running Tally instance over ODBC and browse it.
+#
+# Tally exposes an ODBC server (default port 9000) when "ODBC Server" is
+# enabled. This requires (a) the Tally ODBC driver installed on the machine
+# running this app and (b) Tally running with ODBC on. It therefore only works
+# locally next to Tally — not on a remote/cloud host — so pyodbc is imported
+# lazily and any failure degrades to setup instructions instead of crashing.
+# --------------------------------------------------------------------------
+ODBC_TOOL = "Tally ODBC — Live Data"
+
+# Preset Tally collections and the $fields to pull. Tally's SQL dialect prefixes
+# field names with "$" and selects FROM a collection name (Ledger, Group, …).
+ODBC_PRESETS = {
+    "Ledgers": "SELECT $Name, $Parent, $OpeningBalance, $ClosingBalance, "
+               "$LedStateName, $PartyGSTIN, $GSTRegistrationType FROM Ledger",
+    "Groups": "SELECT $Name, $Parent FROM Group",
+    "Stock Items": "SELECT $Name, $Parent, $BaseUnits, $ClosingBalance, "
+                   "$ClosingValue FROM StockItem",
+    "Cost Centres": "SELECT $Name, $Parent FROM CostCentre",
+    "Voucher Types": "SELECT $Name, $Parent, $NumberingMethod FROM VoucherType",
+    "Vouchers": "SELECT $Date, $VoucherTypeName, $VoucherNumber, $PartyLedgerName, "
+                "$Amount FROM Voucher",
+}
+
+
+def build_odbc_conn_str(mode, dsn, host, port):
+    """Build a pyodbc connection string from the UI inputs."""
+    if mode == "DSN":
+        return f"DSN={dsn}"
+    # Driver name registered by the 64-bit Tally ODBC driver.
+    return f"DRIVER={{Tally ODBC Driver64}};SERVER={host};PORT={port}"
+
+
+def run_odbc_query(conn_str, sql):
+    """Run a query against Tally over ODBC and return a DataFrame.
+
+    Raises ImportError if pyodbc is unavailable, or pyodbc.Error on connection/
+    query failure — the caller surfaces these as friendly messages.
+    """
+    import pyodbc  # lazy: optional dependency, only needed for this section
+
+    conn = pyodbc.connect(conn_str, autocommit=True, timeout=10)
+    try:
+        cursor = conn.cursor()
+        cursor.execute(sql)
+        columns = [d[0] for d in cursor.description] if cursor.description else []
+        rows = [tuple(r) for r in cursor.fetchall()]
+        return pd.DataFrame.from_records(rows, columns=columns)
+    finally:
+        conn.close()
+
+
+# --------------------------------------------------------------------------
 # UI
 # --------------------------------------------------------------------------
 st.sidebar.title("📒 TALLY ML")
 st.sidebar.caption("Excel → Tally XML converter")
-tool_name = st.sidebar.radio("Choose a converter", list(TOOLS.keys()) + [MASTER_XML_TOOL])
+tool_name = st.sidebar.radio(
+    "Choose a converter", list(TOOLS.keys()) + [MASTER_XML_TOOL, ODBC_TOOL])
+
+# ==========================================================================
+# Live tool: browse a running Tally instance over ODBC.
+# ==========================================================================
+if tool_name == ODBC_TOOL:
+    st.title(ODBC_TOOL)
+    st.info(
+        "Connect to a **running Tally** instance over its ODBC server and view "
+        "the data live in this dashboard. This works only when the app runs on "
+        "the same machine as Tally (with the Tally ODBC driver installed)."
+    )
+
+    with st.expander("ℹ️ How to enable ODBC in Tally", expanded=False):
+        st.markdown(
+            """
+1. Open **Tally** (TallyPrime / Tally.ERP 9) and load your company.
+2. Go to **F1: Help → Settings → Connectivity** (or **F12: Configure → Advanced**).
+3. Set **ODBC Server** to **Yes** and note the **port** (default **9000**).
+4. Keep Tally open. This app must run on the **same machine** (or one that can
+   reach Tally's ODBC port) and have the **Tally ODBC driver** installed.
+5. `pip install pyodbc` if it isn't already available.
+"""
+        )
+
+    # ---- Connection settings -------------------------------------------
+    st.subheader("Step 1 — Connect")
+    mode = st.radio("Connection method", ["DSN", "Driver + Host/Port"],
+                    horizontal=True, key="odbc_mode")
+    col_a, col_b = st.columns(2)
+    if mode == "DSN":
+        dsn = col_a.text_input("ODBC DSN name", value="TallyODBC64_9000",
+                               key="odbc_dsn")
+        host, port = "localhost", 9000
+    else:
+        dsn = ""
+        host = col_a.text_input("Host", value="localhost", key="odbc_host")
+        port = col_b.number_input("Port", value=9000, step=1, key="odbc_port")
+
+    conn_str = build_odbc_conn_str(mode, dsn, host, int(port))
+    st.caption(f"Connection string: `{conn_str}`")
+
+    if st.button("🔌 Test connection"):
+        try:
+            df = run_odbc_query(conn_str, "SELECT $Name FROM Company")
+            companies = ", ".join(str(v) for v in df.iloc[:, 0].tolist()) or "—"
+            st.success(f"Connected. Open compan(y/ies): {companies}")
+        except ImportError:
+            st.error(
+                "`pyodbc` is not installed. Run `pip install pyodbc` in the "
+                "environment that runs this app."
+            )
+        except Exception as exc:  # noqa: BLE001
+            st.error(f"Could not connect: {exc}")
+            st.caption(
+                "Check that Tally is open with ODBC enabled, the port matches, "
+                "and the Tally ODBC driver / DSN exists on this machine."
+            )
+
+    st.divider()
+
+    # ---- Browse data ----------------------------------------------------
+    st.subheader("Step 2 — Browse data")
+    preset = st.selectbox("Pick a collection", list(ODBC_PRESETS.keys()))
+    sql = st.text_area("SQL query (Tally dialect)", value=ODBC_PRESETS[preset],
+                       height=100, key=f"odbc_sql_{preset}")
+
+    if st.button("▶️ Run query", type="primary"):
+        with st.spinner("Querying Tally…"):
+            try:
+                df = run_odbc_query(conn_str, sql)
+                if df.empty:
+                    st.warning("Query ran but returned no rows.")
+                else:
+                    st.success(f"{len(df)} row(s).")
+                    st.dataframe(df, use_container_width=True, hide_index=True)
+
+                    out = io.BytesIO()
+                    df.to_excel(out, index=False)
+                    c1, c2 = st.columns(2)
+                    c1.download_button(
+                        "⬇️ Excel (.xlsx)", data=out.getvalue(),
+                        file_name=f"tally_{preset.lower().replace(' ', '_')}.xlsx",
+                        mime=XLSX_MIME,
+                    )
+                    c2.download_button(
+                        "⬇️ CSV", data=df.to_csv(index=False).encode("utf-8"),
+                        file_name=f"tally_{preset.lower().replace(' ', '_')}.csv",
+                        mime="text/csv",
+                    )
+            except ImportError:
+                st.error(
+                    "`pyodbc` is not installed. Run `pip install pyodbc` in the "
+                    "environment that runs this app."
+                )
+            except Exception as exc:  # noqa: BLE001
+                st.error(f"Query failed: {exc}")
+
+    st.stop()
 
 # ==========================================================================
 # Reverse tool: Tally Master XML  ->  Master-Ledger Excel.

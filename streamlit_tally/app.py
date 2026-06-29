@@ -453,9 +453,33 @@ def collect_ps_ledger_names(file_bytes):
     return sorted(names)
 
 
-def closest_ledger_names(name, tally_names, n=3):
-    """Return up to n closest Tally ledger names to `name` (best first)."""
-    return difflib.get_close_matches(name, tally_names, n=n, cutoff=0.5)
+def _norm_name(s):
+    """Lower-case and collapse whitespace for case-insensitive comparison."""
+    return " ".join(str(s).lower().split())
+
+
+def closest_ledger_names(name, tally_names, n=6):
+    """Return up to n closest Tally ledger names to `name`, best first.
+
+    Case-INSENSITIVE (Tally names are often title-case while uploads are
+    upper-case) and word-aware: the score blends a character-level similarity
+    with a token-overlap (Jaccard) score, so reordered or extra words (e.g. an
+    extra "AND") still rank the right ledger highly. Always returns the best
+    candidates so the user has options to pick from.
+    """
+    q = _norm_name(name)
+    q_tokens = set(q.split())
+    scored = []
+    for cand in tally_names:
+        c = _norm_name(cand)
+        seq = difflib.SequenceMatcher(None, q, c).ratio()
+        c_tokens = set(c.split())
+        union = q_tokens | c_tokens
+        jacc = len(q_tokens & c_tokens) / len(union) if union else 0.0
+        score = 0.6 * seq + 0.4 * jacc
+        scored.append((score, cand))
+    scored.sort(key=lambda x: x[0], reverse=True)
+    return [cand for _score, cand in scored[:n]]
 
 
 def apply_ledger_corrections(file_bytes, corrections):

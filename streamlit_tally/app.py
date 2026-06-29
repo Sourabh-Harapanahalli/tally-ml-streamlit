@@ -593,22 +593,25 @@ def ps_ledger_check_ui(file_bytes):
             st.rerun()
 
         st.warning(f"⚠️ **{len(unresolved)}** ledger name(s) don't match Tally. "
-                   "Apply a suggested fix or correct them in your Excel.")
+                   "Pick the right ledger (type in the dropdown to search all "
+                   f"{len(tally_names)} Tally ledgers) and click Fix.")
 
+        sorted_names = sorted(tally_names, key=str.lower)
         for i, (name, effective, suggestions) in enumerate(unresolved):
             c1, c2, c3 = st.columns([3, 3, 2])
             shown = name if effective == name else f"{name}  →  {effective}"
             c1.markdown(f"❌ `{shown}`")
-            if suggestions:
-                choice = c2.selectbox(
-                    "Closest Tally ledger", suggestions,
-                    key=f"ps_chk_sugg_{i}", label_visibility="collapsed")
-                if c3.button("Fix", key=f"ps_chk_fix_{i}"):
-                    corrections[name] = choice
-                    st.rerun()
-            else:
-                c2.markdown("_no close match found_")
-                c3.write("")
+            # Suggestions first (best match pre-selected), then every other
+            # ledger — the selectbox is type-to-search across the whole list.
+            seen = set(suggestions)
+            options = suggestions + [n for n in sorted_names if n not in seen]
+            choice = c2.selectbox(
+                "Closest Tally ledger", options,
+                key=f"ps_chk_sugg_{i}", label_visibility="collapsed",
+                placeholder="Type to search ledgers…")
+            if c3.button("Fix", key=f"ps_chk_fix_{i}"):
+                corrections[name] = choice
+                st.rerun()
 
         # Apply whatever has been staged so far so partial fixes still take effect.
         convert_bytes = apply_ledger_corrections(file_bytes, corrections) if corrections else file_bytes

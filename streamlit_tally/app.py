@@ -472,7 +472,9 @@ def find_dates_out_of_range(file_bytes, date_from, date_to):
 
     raw = df["Datetime"]
     non_blank = raw.notna() & (raw.astype(str).str.strip() != "")
-    parsed = pd.to_datetime(raw, dayfirst=True, errors="coerce")
+    # Parse day-first per-element (format="mixed") so both "3/4/2025" and
+    # "14-04-2025" in the same column parse correctly — matches the converter.
+    parsed = pd.to_datetime(raw, dayfirst=True, format="mixed", errors="coerce")
     lo, hi = pd.Timestamp(date_from), pd.Timestamp(date_to)
 
     out_mask = non_blank & parsed.notna() & ((parsed < lo) | (parsed > hi))
@@ -576,20 +578,19 @@ def ps_date_range_ui():
 
 
 def ps_ledger_check_ui(file_bytes):
-    """Verify Purchase/Sales ledger names against Tally.
+    """Verify Purchase/Sales ledger names against Tally, before conversion.
 
-    Returns ``(convert_bytes, blocking_count)``:
+    Returns ``(convert_bytes, blocked)``:
 
     * ``convert_bytes`` — the (possibly corrected) workbook bytes to convert.
-    * ``blocking_count`` — number of unresolved mismatches that should pause
-      conversion. It is 0 when the user hasn't run the check (so conversion
-      works without ODBC), when everything matches, or when the user ticks
-      "convert anyway". When > 0 the caller must not convert yet.
+    * ``blocked`` — True while conversion must wait: the Tally check hasn't
+      been run yet (and not skipped), or there are unresolved mismatches the
+      user hasn't chosen to ignore. The caller must not convert when True.
     """
     convert_bytes = file_bytes
-    st.subheader("Step 2a — Verify ledger names against Tally (optional)")
+    st.subheader("Step 2a — Verify ledger names against Tally")
     with st.expander("🔗 Check PartyLedgerName / Dr_LedgerName against your Tally company",
-                     expanded=False):
+                     expanded=True):
         st.caption(
             "Tally imports are **case-sensitive** and need the exact ledger "
             "names — a small typo or wrong case makes the whole import fail. "
@@ -618,9 +619,16 @@ def ps_ledger_check_ui(file_bytes):
 
         tally_names = st.session_state.get("ps_tally_ledgers")
         if not tally_names:
-            st.info("Not checked yet — fetch ledger names above, or skip and "
-                    "convert as-is.")
-            return convert_bytes, 0
+            # Conversion waits until the check is run — unless explicitly skipped.
+            skip = st.checkbox(
+                "Skip Tally check (convert without validating ledger names)",
+                key="ps_chk_skip")
+            if skip:
+                st.caption("⚠️ Ledger names will NOT be validated against Tally.")
+                return convert_bytes, False
+            st.info("⏸️ Conversion is paused — fetch ledger names from Tally above "
+                    "to validate, or tick “Skip Tally check”.")
+            return convert_bytes, True
 
         corrections = st.session_state.setdefault("ps_corrections", {})
         tally_set = set(tally_names)
@@ -643,7 +651,7 @@ def ps_ledger_check_ui(file_bytes):
         if not unresolved:
             st.success("✅ All ledger names match Tally — converting below.")
             corrected = apply_ledger_corrections(file_bytes, corrections) if corrections else convert_bytes
-            return corrected, 0
+            return corrected, False
 
         # Offer a one-click "apply all suggestions" for names that have one.
         fixable = [u for u in unresolved if u[2]]
@@ -698,8 +706,11 @@ def ps_ledger_check_ui(file_bytes):
         convert_anyway = st.checkbox(
             "Convert anyway, ignoring the unmatched names above",
             key="ps_chk_convert_anyway")
+        if not convert_anyway:
+            st.info("⏸️ Conversion is paused until every name is fixed "
+                    "(or tick “Convert anyway”).")
 
-    return convert_bytes, 0 if convert_anyway else len(unresolved)
+    return convert_bytes, (not convert_anyway)
 
 
 # --------------------------------------------------------------------------
@@ -1014,8 +1025,20 @@ if uploaded is not None:
             st.markdown("**Rows needing attention:**")
             st.dataframe(reg_detail, use_container_width=True, hide_index=True)
 
-    # ---- Validation (Purchase / Sales date range) ----------------------
+    if block_conversion:
+        st.info("Conversion is paused until the errors above are resolved.")
+        st.stop()
+
+    # ---- Step 2a: Ledger-name check against Tally (Purchase / Sales) ----
+    convert_bytes = uploaded.getvalue()
+    if tool_name == "Purchase / Sales":
+        convert_bytes, ledger_blocked = ps_ledger_check_ui(uploaded.getvalue())
+        if ledger_blocked:
+            st.stop()
+
+    # ---- Step 2b: Voucher date range check (Purchase / Sales) ----------
     if tool_name == "Purchase / Sales" and date_enabled:
+        st.subheader("Step 2b — Voucher date range check")
         if date_from and date_to and date_from <= date_to:
             try:
                 oor_df, n_unparsed = find_dates_out_of_range(
@@ -1026,7 +1049,6 @@ if uploaded is not None:
 
             span = f"{date_from:%d/%m/%Y} – {date_to:%d/%m/%Y}"
             if oor_df is not None:
-                block_conversion = True
                 st.error(
                     f"🚫 **{len(oor_df)}** voucher(s) have a date outside the "
                     f"selected range (**{span}**). Fix these rows or widen the "
@@ -1040,26 +1062,12 @@ if uploaded is not None:
                 )
             if oor_df is None and not n_unparsed:
                 st.success(f"✅ All voucher dates fall within {span}.")
+            if oor_df is not None:
+                st.info("Conversion is paused until the dates above are fixed.")
+                st.stop()
         else:
             st.warning("Set a valid From/To date range above to validate "
                        "voucher dates.")
-
-    if block_conversion:
-        st.info("Conversion is paused until the errors above are resolved.")
-        st.stop()
-
-    # ---- Ledger-name check against Tally (Purchase / Sales) -------------
-    convert_bytes = uploaded.getvalue()
-    if tool_name == "Purchase / Sales":
-        convert_bytes, ledger_unresolved = ps_ledger_check_ui(uploaded.getvalue())
-        if ledger_unresolved:
-            st.info(
-                f"⏸️ Conversion paused — resolve the **{ledger_unresolved}** "
-                "ledger-name mismatch(es) above (apply a fix for each, or tick "
-                "“Convert anyway”). Conversion runs automatically once they're "
-                "resolved."
-            )
-            st.stop()
 
     st.subheader("Step 3 — Convert")
     with st.spinner("Converting to Tally XML…"):

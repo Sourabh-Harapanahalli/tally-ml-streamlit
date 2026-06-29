@@ -318,22 +318,13 @@ class Purchase_Sales:
             # default_date = pd.to_datetime('1998-01-01')  # Define your default date
             # data['DATE'] = data['DATE'].fillna(default_date)
 
-            try:
-                data['DATE'] = pd.NaT
-                # If 'Datetime' column is already datetime type, format it
-                data['DATE'] = pd.to_datetime(data['Datetime'],dayfirst=True).dt.strftime('%Y%m%d')
-            except:
-                data['DATE'] = None
-                # If 'Datetime' column is string type, parse and format it
-                for x in range(len(data['Datetime'])):
-                    if '/' in str(data['Datetime'].iloc[x]):
-                        string = str(data['Datetime'].iloc[x]).split('/')
-                    elif '-' in str(data['Datetime'].iloc[x]):
-                        string = str(data['Datetime'].iloc[x]).split('-')
-                    else:
-                        continue
-                    data['DATE'].iloc[x] = string[-1] + string[-2] + string[-3]
-
+            # Parse voucher dates day-first (DD/MM/YYYY) in one pass, handling
+            # either "/" or "-" separators and single- or double-digit day/month
+            # (and real datetime cells). strftime guarantees a zero-padded
+            # YYYYMMDD; anything unparseable falls back to 19980101.
+            data['DATE'] = pd.to_datetime(
+                data['Datetime'], dayfirst=True, format='mixed', errors='coerce'
+            ).dt.strftime('%Y%m%d')
             data['DATE'] = data['DATE'].fillna('19980101')
             data=data.fillna('')
 
@@ -2374,25 +2365,13 @@ class Pay_Con_Rec:
         if uploaded_file:
             data=pd.read_excel(uploaded_file,sheet_name='TEMPLATE')
 
-            data['DATE'] = pd.NaT
-
-            try:
-                # If 'Datetime' column is already datetime type, format it
-                data['DATE'] = pd.to_datetime(data['DATE_TIME']).dt.strftime('%Y%m%d')
-            except:
-                # If 'Datetime' column is string type, parse and format it
-                for x in range(len(data['DATE_TIME'])):
-                    if '/' in data['DATE_TIME'].iloc[x]:
-                        string = data['DATE_TIME'].iloc[x].split('/')
-                    elif '-' in data['DATE_TIME'].iloc[x]:
-                        string = data['DATE_TIME'].iloc[x].split('-')
-                    else:
-                        continue
-                    data['DATE'].iloc[x] = string[-1] + string[-2] + string[-3]
-
-            # Set default date for missing values
-            default_date = pd.to_datetime('1998-01-01')  # Define your default date
-            data['DATE'] = data['DATE'].fillna(default_date)
+            # Parse day-first (DD/MM/YYYY) in one pass, handling "/" or "-"
+            # separators and single- or double-digit day/month. strftime gives a
+            # zero-padded YYYYMMDD; unparseable values fall back to 19980101.
+            data['DATE'] = pd.to_datetime(
+                data['DATE_TIME'], dayfirst=True, format='mixed', errors='coerce'
+            ).dt.strftime('%Y%m%d')
+            data['DATE'] = data['DATE'].fillna('19980101')
 
             for x in data:
                 if ('int' in str(data[x].dtypes) or 'float' in str(data[x].dtypes))and 'Supplier_Invoice' not in x:

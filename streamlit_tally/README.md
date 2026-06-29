@@ -1,9 +1,11 @@
 # TALLY ML — Streamlit
 
-A Streamlit version of the TALLY ML Excel → Tally XML converter.
+A self-contained Streamlit app that converts Excel sheets to Tally XML (and
+browses a live Tally instance over ODBC).
 
-It **reuses the original Django app's processing logic** (`../TALLY ML/GST/GSTapp/views.py`)
-unchanged, so the generated Tally XML/Excel is identical — only the UI is new.
+All conversion logic lives in [`tally_core.py`](tally_core.py) — pure
+pandas/openpyxl, no web framework. The output is byte-for-byte identical to the
+original Django implementation this was ported from.
 
 ## Setup
 
@@ -26,28 +28,27 @@ Opens at http://localhost:8501. To share on your local network:
 streamlit run app.py --server.address 0.0.0.0
 ```
 
-## How it works
+## What it does
 
-The app imports the Django view functions and calls them with a tiny
-`FakeRequest` (just `.FILES` + `.session`). Each converter:
+Each converter (Purchase/Sales, Payment/Contra/Receipt, and the three Master
+types):
 
 1. **Step 1** — download the blank Excel template.
 2. **Step 2** — upload the filled template; download the resulting
    `.xml`, `.xlsx`, or a `.zip` of both.
 
-### Project location
+There are also two extra tools:
 
-By default the app expects the original Django project as a sibling:
+- **Master XML → Excel (reverse)** — turn a Tally "All Masters" XML export back
+  into the Master — Ledger Excel format.
+- **Tally ODBC — Live Data** — query a running Tally instance over its ODBC
+  server (needs the Tally ODBC driver; install `pyodbc` and run next to Tally).
+
+## Layout
 
 ```
-TALLY_ML/
-├── TALLY ML/GST/        <- original Django project (manage.py, GSTapp/)
-└── streamlit_tally/     <- this app
-```
-
-If you move things, point the app at the project folder (the one with
-`manage.py`):
-
-```bash
-TALLY_DJANGO_DIR="/path/to/TALLY ML/GST" streamlit run app.py
+streamlit_tally/
+├── app.py          <- Streamlit UI
+├── tally_core.py   <- conversion engine (Excel <-> Tally XML)
+└── requirements.txt
 ```

@@ -1,102 +1,36 @@
 """
-TALLY ML — Streamlit front-end.
+TALLY ML — Streamlit app.
 
-This reuses the EXACT processing logic from the original Django app
-(GSTapp/views.py) so the generated Tally XML/Excel is byte-for-byte the
-same. Instead of the Django request/response + templates, we drive the
-view functions with a tiny fake request and render the UI with Streamlit.
-
-The Django project itself is left untouched in ../TALLY ML/GST — this app
-just imports its view functions.
+A self-contained Excel <-> Tally-XML converter. All processing logic lives in
+``tally_core`` (pure pandas/openpyxl, no web framework); this module is the
+entire UI. The conversion output is byte-for-byte identical to the original
+Django implementation this was ported from.
 
 Run:  streamlit run app.py
 """
 
 import html
 import io
-import os
 import re
-import sys
 
 import pandas as pd
 import streamlit as st
 from openpyxl import load_workbook
 
+import tally_core
+
 # Must be the first Streamlit command in the script.
 st.set_page_config(page_title="TALLY ML", page_icon="📒", layout="centered")
 
 # --------------------------------------------------------------------------
-# Locate the original Django project, make it importable and configure it.
-# No Django server is started; we only import the view functions and call
-# them directly.
-# --------------------------------------------------------------------------
-THIS_DIR = os.path.dirname(os.path.abspath(__file__))
-# Allow overriding via env var; otherwise assume the sibling layout:
-#   TALLY_ML/streamlit_tally/app.py   and   TALLY_ML/TALLY ML/GST/
-DJANGO_DIR = os.environ.get(
-    "TALLY_DJANGO_DIR",
-    os.path.join(os.path.dirname(THIS_DIR), "TALLY ML", "GST"),
-)
-DJANGO_DIR = os.path.abspath(DJANGO_DIR)
-
-if not os.path.isdir(os.path.join(DJANGO_DIR, "GSTapp")):
-    st.error(
-        f"Could not find the Django project at:\n\n`{DJANGO_DIR}`\n\n"
-        "Set the TALLY_DJANGO_DIR environment variable to the folder that "
-        "contains `manage.py` and the `GSTapp` package."
-    )
-    st.stop()
-
-if DJANGO_DIR not in sys.path:
-    sys.path.insert(0, DJANGO_DIR)
-# The template generators write .xlsx files into the current working
-# directory and the blank-template source files live in DJANGO_DIR, so pin
-# CWD there.
-os.chdir(DJANGO_DIR)
-
-
-@st.cache_resource
-def load_views():
-    """Configure Django once and return the views module."""
-    import django
-
-    os.environ.setdefault("DJANGO_SETTINGS_MODULE", "GST.settings")
-    django.setup()
-
-    from GSTapp import views
-
-    # The view POST methods finish by calling render() to show an HTML page.
-    # We don't use templates here, so neutralise render() — we read the
-    # results straight out of the (fake) request session instead.
-    views.render = lambda *args, **kwargs: None
-    return views
-
-
-views = load_views()
-
-
-# --------------------------------------------------------------------------
-# Minimal stand-in for a Django HttpRequest. The views only ever touch
-# `.FILES` and `.session`, so that is all we need to provide.
-# --------------------------------------------------------------------------
-class FakeRequest:
-    def __init__(self, files=None):
-        self.FILES = files or {}
-        self.session = {}
-        self.POST = {}
-        self.GET = {}
-        self.method = "POST"
-
-
-# --------------------------------------------------------------------------
-# Tool catalogue — maps each converter to its upload key, view class and
-# blank-template generator (all straight from the original urls.py/views.py).
+# Tool catalogue — maps each converter to its upload key, conversion function
+# and blank-template generator (all in tally_core).
 # --------------------------------------------------------------------------
 TOOLS = {
     "Purchase / Sales": {
         "upload_key": "upload_file",
-        "view": lambda: views.Purchase_Sales(),
-        "template_fn": lambda: views.download_excel,
+        "convert": tally_core.convert_purchase_sales,
+        "template": tally_core.template_purchase,
         "template_name": "Template_Purchase.xlsx",
         "help": "Purchase & Sales vouchers with GST (CGST/SGST/IGST) breakup. "
                 "The template has two sheets: TEMPLATE (your data) and "
@@ -104,30 +38,30 @@ TOOLS = {
     },
     "Payment / Contra / Receipt": {
         "upload_key": "upload_file_pay_con_rec",
-        "view": lambda: views.Pay_Con_Rec(),
-        "template_fn": lambda: views.download_excel_pay_con_rec,
+        "convert": tally_core.convert_pay_con_rec,
+        "template": tally_core.template_pay_con_rec,
         "template_name": "Template_Pay_Con_Rec.xlsx",
         "help": "Payment, Contra and Receipt vouchers (Dr/Cr ledger entries).",
     },
     "Master — Ledger": {
         "upload_key": "upload_file_master_ledger",
-        "view": lambda: views.Master_Ledger(),
-        "template_fn": lambda: views.download_excel_master_1,
+        "convert": tally_core.convert_master_ledger,
+        "template": tally_core.template_master_ledger,
         "template_name": "Template_Master_Ledger.xlsx",
         "help": "Create ledger masters (groups, GST no., opening balance, address). "
                 "The REFERENCE sheet lists the valid Tally group names.",
     },
     "Master — Duties & Taxes": {
         "upload_key": "upload_file_master_duties",
-        "view": lambda: views.Master_Duties(),
-        "template_fn": lambda: views.download_excel_master_2,
+        "convert": tally_core.convert_master_duties,
+        "template": tally_core.template_master_duties,
         "template_name": "Template_Master_DPS.xlsx",
         "help": "Create Duties & Taxes ledgers (rate of tax, tax type).",
     },
     "Master — Purchase/Sales Ledgers": {
         "upload_key": "upload_file_master_ps",
-        "view": lambda: views.Master_PS(),
-        "template_fn": lambda: views.download_excel_master_3,
+        "convert": tally_core.convert_master_ps,
+        "template": tally_core.template_master_ps,
         "template_name": "Template_Master_PS.xlsx",
         "help": "Create Purchase/Sales ledgers with nature of transaction and GST rates.",
     },
@@ -139,9 +73,7 @@ XLSX_MIME = "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
 @st.cache_data(show_spinner=False)
 def build_template(tool_name):
     """Generate a blank template workbook and return its bytes."""
-    fn = TOOLS[tool_name]["template_fn"]()
-    response = fn(FakeRequest())
-    return bytes(response.content)
+    return TOOLS[tool_name]["template"]()
 
 
 # --------------------------------------------------------------------------
@@ -413,14 +345,19 @@ def find_missing_regular_fields(df):
 ODBC_TOOL = "Tally ODBC — Live Data"
 
 # Preset Tally collections, as Tally-dialect SQL ($field names, FROM <type>).
-# The Ledgers query mirrors every column in the Master — Ledger Excel template
-# (Ledger_Name, Alias, Group_Name, Country, State_Name, Pincode,
-# Registration_Type, GST_NO, Opening_Balance, Address). Dr/Cr is not a stored
-# field — it is the sign of the opening balance — so it is omitted here.
+# The Ledgers query mirrors the Master — Ledger Excel template columns, using
+# the field names verified against Tally's column metadata:
+#   Ledger_Name -> $Name            Group_Name        -> $Parent
+#   Country     -> $CountryName      State_Name        -> $LedStateName
+#   Pincode     -> $PINCode          Registration_Type -> $GSTRegistrationType
+#   GST_NO      -> $PartyGSTIN       Opening_Balance   -> $OpeningBalance
+#   Address     -> $Address
+# Alias and Dr/Cr have no ODBC column: aliases live in Tally's language-name
+# list (not exposed via SQL), and Dr/Cr is just the sign of the opening balance.
 ODBC_PRESETS = {
-    "Ledgers": "SELECT $Name, $Alias, $Parent, $CountryName, $LedStateName, "
-               "$PinCode, $GSTRegistrationType, $PartyGSTIN, $OpeningBalance, "
-               "$ClosingBalance, $Address FROM Ledger",
+    "Ledgers": "SELECT $Name, $Parent, $CountryName, $LedStateName, $PINCode, "
+               "$GSTRegistrationType, $PartyGSTIN, $OpeningBalance, "
+               "$_ClosingBalance, $Address FROM Ledger",
     "Groups": "SELECT $Name, $Parent FROM Group",
     "Stock Items": "SELECT $Name, $Parent, $BaseUnits, $ClosingBalance, "
                    "$ClosingValue FROM StockItem",
@@ -796,16 +733,11 @@ if uploaded is not None:
 
     with st.spinner("Converting to Tally XML…"):
         try:
-            # Hand the view a fresh, seekable copy of the bytes under the
-            # exact key the original Django form used.
-            buffer = io.BytesIO(uploaded.getvalue())
-            req = FakeRequest(files={tool["upload_key"]: buffer})
+            # Hand the converter a fresh, seekable copy of the uploaded bytes.
+            result = tool["convert"](io.BytesIO(uploaded.getvalue()))
 
-            tool["view"]().post(req)
-
-            xml_final = req.session.get("xml_final")
-            csv_string = req.session.get("data_csv")
-            file_name = req.session.get("file_name") or "tally"
+            xml_final = result.get("xml_final") if result else None
+            file_name = (result.get("file_name") if result else None) or "tally"
 
             if not xml_final:
                 st.error(
@@ -815,30 +747,25 @@ if uploaded is not None:
             else:
                 st.success("Done! Download your files below.")
 
-                # Reuse the original download views for identical output.
-                xml_resp = views.download_xml_file(req)
-                zip_resp = views.download_xml(req)
-                xlsx_resp = views.download_xml_excel(req)
-
                 col1, col2, col3 = st.columns(3)
                 with col1:
                     st.download_button(
                         "⬇️ Tally XML",
-                        data=bytes(xml_resp.content),
+                        data=tally_core.result_xml_bytes(result),
                         file_name=f"{file_name}.xml",
                         mime="application/xml",
                     )
                 with col2:
                     st.download_button(
                         "⬇️ Excel (.xlsx)",
-                        data=bytes(xlsx_resp.content),
+                        data=tally_core.result_excel_bytes(result),
                         file_name="data.xlsx",
                         mime=XLSX_MIME,
                     )
                 with col3:
                     st.download_button(
                         "⬇️ Both (.zip)",
-                        data=bytes(zip_resp.content),
+                        data=tally_core.result_zip_bytes(result),
                         file_name="files.zip",
                         mime="application/zip",
                     )

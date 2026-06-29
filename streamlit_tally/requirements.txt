@@ -1,8 +1,12 @@
 # Loosened pins so prebuilt wheels are used (no source builds) across
 # Python 3.11 / 3.12 / 3.13. Keep pandas < 3 to preserve current behavior.
 streamlit>=1.39,<2
-Django>=5.0,<5.3
 pandas>=2.2,<3
 numpy>=1.26,<3
 openpyxl>=3.1
-XlsxWriter>=3.2
+
+# Optional — only for the "Tally ODBC — Live Data" section, which talks to a
+# running Tally instance over ODBC. Needs the Tally ODBC driver on the host
+# plus a system ODBC manager, so it is left commented to keep the build
+# self-contained. Uncomment (or `pip install pyodbc`) when running next to Tally.
+# pyodbc>=5.1

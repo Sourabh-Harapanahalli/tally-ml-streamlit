@@ -593,23 +593,39 @@ def ps_ledger_check_ui(file_bytes):
             st.rerun()
 
         st.warning(f"⚠️ **{len(unresolved)}** ledger name(s) don't match Tally. "
-                   "Pick the right ledger (type in the dropdown to search all "
-                   f"{len(tally_names)} Tally ledgers) and click Fix.")
+                   f"Pick the right ledger (search across all {len(tally_names)} "
+                   "Tally ledgers) and click Fix.")
 
         sorted_names = sorted(tally_names, key=str.lower)
         for i, (name, effective, suggestions) in enumerate(unresolved):
-            c1, c2, c3 = st.columns([3, 3, 2])
             shown = name if effective == name else f"{name}  →  {effective}"
-            c1.markdown(f"❌ `{shown}`")
+            st.markdown(f"❌ `{shown}` — pick the correct ledger:")
+
             # Suggestions first (best match pre-selected), then every other
-            # ledger — the selectbox is type-to-search across the whole list.
+            # ledger, all in their original Tally case.
             seen = set(suggestions)
             options = suggestions + [n for n in sorted_names if n not in seen]
-            choice = c2.selectbox(
-                "Closest Tally ledger", options,
-                key=f"ps_chk_sugg_{i}", label_visibility="collapsed",
-                placeholder="Type to search ledgers…")
-            if c3.button("Fix", key=f"ps_chk_fix_{i}"):
+
+            sc1, sc2, sc3 = st.columns([3, 4, 1])
+            # Case-INSENSITIVE substring search; the list keeps original case
+            # and narrows as you type (press Enter to apply the filter).
+            query = sc1.text_input(
+                "Search", key=f"ps_chk_search_{i}",
+                placeholder="🔎 search (case-insensitive)…",
+                label_visibility="collapsed")
+            if query:
+                ql = query.lower()
+                filtered = [n for n in options if ql in n.lower()]
+            else:
+                filtered = options
+            if not filtered:
+                sc1.caption("No ledger contains that text.")
+                filtered = options
+
+            choice = sc2.selectbox(
+                "Closest Tally ledger", filtered,
+                key=f"ps_chk_sugg_{i}", label_visibility="collapsed")
+            if sc3.button("Fix", key=f"ps_chk_fix_{i}"):
                 corrections[name] = choice
                 st.rerun()
 

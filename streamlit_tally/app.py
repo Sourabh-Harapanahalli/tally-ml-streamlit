@@ -520,11 +520,15 @@ def odbc_connection_form(prefix):
 
 
 def ps_ledger_check_ui(file_bytes):
-    """Verify Purchase/Sales ledger names against Tally; return bytes to convert.
+    """Verify Purchase/Sales ledger names against Tally.
 
-    Returns the (possibly corrected) workbook bytes to feed the converter. If
-    the user hasn't connected to Tally, the original bytes are returned
-    unchanged so conversion still works without ODBC.
+    Returns ``(convert_bytes, blocking_count)``:
+
+    * ``convert_bytes`` — the (possibly corrected) workbook bytes to convert.
+    * ``blocking_count`` — number of unresolved mismatches that should pause
+      conversion. It is 0 when the user hasn't run the check (so conversion
+      works without ODBC), when everything matches, or when the user ticks
+      "convert anyway". When > 0 the caller must not convert yet.
     """
     convert_bytes = file_bytes
     st.subheader("Step 2a — Verify ledger names against Tally (optional)")
@@ -560,7 +564,7 @@ def ps_ledger_check_ui(file_bytes):
         if not tally_names:
             st.info("Not checked yet — fetch ledger names above, or skip and "
                     "convert as-is.")
-            return convert_bytes
+            return convert_bytes, 0
 
         corrections = st.session_state.setdefault("ps_corrections", {})
         tally_set = set(tally_names)
@@ -581,8 +585,9 @@ def ps_ledger_check_ui(file_bytes):
                        "to the file before conversion.")
 
         if not unresolved:
-            st.success("✅ All ledger names match Tally exactly.")
-            return apply_ledger_corrections(file_bytes, corrections) if corrections else convert_bytes
+            st.success("✅ All ledger names match Tally — converting below.")
+            corrected = apply_ledger_corrections(file_bytes, corrections) if corrections else convert_bytes
+            return corrected, 0
 
         # Offer a one-click "apply all suggestions" for names that have one.
         fixable = [u for u in unresolved if u[2]]
@@ -632,7 +637,13 @@ def ps_ledger_check_ui(file_bytes):
         # Apply whatever has been staged so far so partial fixes still take effect.
         convert_bytes = apply_ledger_corrections(file_bytes, corrections) if corrections else file_bytes
 
-    return convert_bytes
+        # Conversion stays paused while names are unresolved, unless the user
+        # explicitly opts to convert anyway (e.g. ledgers created later in Tally).
+        convert_anyway = st.checkbox(
+            "Convert anyway, ignoring the unmatched names above",
+            key="ps_chk_convert_anyway")
+
+    return convert_bytes, 0 if convert_anyway else len(unresolved)
 
 
 # --------------------------------------------------------------------------
@@ -949,7 +960,15 @@ if uploaded is not None:
     # ---- Ledger-name check against Tally (Purchase / Sales) -------------
     convert_bytes = uploaded.getvalue()
     if tool_name == "Purchase / Sales":
-        convert_bytes = ps_ledger_check_ui(uploaded.getvalue())
+        convert_bytes, ledger_unresolved = ps_ledger_check_ui(uploaded.getvalue())
+        if ledger_unresolved:
+            st.info(
+                f"⏸️ Conversion paused — resolve the **{ledger_unresolved}** "
+                "ledger-name mismatch(es) above (apply a fix for each, or tick "
+                "“Convert anyway”). Conversion runs automatically once they're "
+                "resolved."
+            )
+            st.stop()
 
     st.subheader("Step 3 — Convert")
     with st.spinner("Converting to Tally XML…"):

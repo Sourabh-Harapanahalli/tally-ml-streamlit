@@ -37,6 +37,12 @@ types):
 2. **Step 2** — upload the filled template; download the resulting
    `.xml`, `.xlsx`, or a `.zip` of both.
 
+For **Purchase / Sales**, an optional step verifies the `PartyLedgerName` and
+`Dr_LedgerName` values against the live ledger names in your Tally company
+(over ODBC). Tally imports are case-sensitive and need exact names, so any
+mismatch is flagged with the closest matching ledger and a one-click **Fix**
+button that corrects the file before conversion.
+
 There are also two extra tools:
 
 - **Master XML → Excel (reverse)** — turn a Tally "All Masters" XML export back

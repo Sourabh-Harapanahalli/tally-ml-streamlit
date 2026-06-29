@@ -9,6 +9,7 @@ Django implementation this was ported from.
 Run:  streamlit run app.py
 """
 
+import difflib
 import html
 import io
 import re
@@ -421,6 +422,177 @@ def list_collection_columns(conn_str, table):
 
 
 # --------------------------------------------------------------------------
+# Ledger-name validation for Purchase / Sales.
+#
+# Tally imports are case-sensitive and need EXACT ledger names — a single typo
+# or wrong case makes the whole XML import fail. These helpers fetch the live
+# ledger names from Tally (ODBC) and compare them against the PartyLedgerName /
+# Dr_LedgerName columns, suggesting the closest real name for any mismatch.
+# --------------------------------------------------------------------------
+PS_LEDGER_COLUMNS = ["PartyLedgerName", "Dr_LedgerName"]
+
+
+def fetch_tally_ledger_names(conn_str):
+    """Return the list of ledger names from a running Tally instance (ODBC)."""
+    df = run_odbc_query(conn_str, "SELECT $Name FROM Ledger")
+    if df.empty:
+        return []
+    return [str(v).strip() for v in df.iloc[:, 0].tolist() if str(v).strip()]
+
+
+def collect_ps_ledger_names(file_bytes):
+    """Sorted unique non-blank PartyLedgerName / Dr_LedgerName values used."""
+    df = pd.read_excel(io.BytesIO(file_bytes), sheet_name="TEMPLATE").fillna("")
+    names = set()
+    for col in PS_LEDGER_COLUMNS:
+        if col in df.columns:
+            for v in df[col].astype(str):
+                v = v.strip()
+                if v:
+                    names.add(v)
+    return sorted(names)
+
+
+def closest_ledger_names(name, tally_names, n=3):
+    """Return up to n closest Tally ledger names to `name` (best first)."""
+    return difflib.get_close_matches(name, tally_names, n=n, cutoff=0.5)
+
+
+def apply_ledger_corrections(file_bytes, corrections):
+    """Return new .xlsx bytes with PartyLedgerName / Dr_LedgerName cells renamed.
+
+    Only the two ledger columns on the TEMPLATE sheet are touched; everything
+    else (including the MASTER_LEDGER_NAME_LINK sheet) is preserved verbatim.
+    """
+    wb = load_workbook(io.BytesIO(file_bytes))
+    ws = wb["TEMPLATE"]
+    headers = [c.value for c in ws[1]]
+    for col in PS_LEDGER_COLUMNS:
+        if col in headers:
+            ci = headers.index(col) + 1
+            for r in range(2, ws.max_row + 1):
+                cell = ws.cell(row=r, column=ci)
+                key = str(cell.value).strip() if cell.value is not None else ""
+                if key in corrections:
+                    cell.value = corrections[key]
+    out = io.BytesIO()
+    wb.save(out)
+    return out.getvalue()
+
+
+def odbc_connection_form(prefix):
+    """Render Tally ODBC connection inputs and return a pyodbc connection string."""
+    c1, c2 = st.columns(2)
+    host = c1.text_input("Host", value="localhost", key=f"{prefix}_host")
+    port = c2.number_input("Port", value=9000, step=1, key=f"{prefix}_port")
+    mode = st.radio("Connection style", ["DSN", "Driver name"],
+                    horizontal=True, key=f"{prefix}_mode")
+    if mode == "DSN":
+        dsn = st.text_input("ODBC DSN name", value="TallyODBC64_9000", key=f"{prefix}_dsn")
+        return build_odbc_conn_str("DSN", dsn, "", host, int(port))
+    driver = st.text_input("Driver name (exact)", value="Tally ODBC Driver64",
+                           key=f"{prefix}_driver")
+    return build_odbc_conn_str("Driver", "", driver, host, int(port))
+
+
+def ps_ledger_check_ui(file_bytes):
+    """Verify Purchase/Sales ledger names against Tally; return bytes to convert.
+
+    Returns the (possibly corrected) workbook bytes to feed the converter. If
+    the user hasn't connected to Tally, the original bytes are returned
+    unchanged so conversion still works without ODBC.
+    """
+    convert_bytes = file_bytes
+    st.subheader("Step 2a — Verify ledger names against Tally (optional)")
+    with st.expander("🔗 Check PartyLedgerName / Dr_LedgerName against your Tally company",
+                     expanded=False):
+        st.caption(
+            "Tally imports are **case-sensitive** and need the exact ledger "
+            "names — a small typo or wrong case makes the whole import fail. "
+            "Connect to a running Tally (ODBC, same machine) to catch problems "
+            "before converting."
+        )
+        conn_str = odbc_connection_form("ps_chk")
+        st.caption(f"Connection string: `{conn_str}`")
+
+        if st.button("🔍 Fetch ledger names from Tally & check", key="ps_chk_fetch"):
+            try:
+                names = fetch_tally_ledger_names(conn_str)
+                st.session_state["ps_tally_ledgers"] = names
+                st.session_state["ps_corrections"] = {}
+                if not names:
+                    st.warning("Connected, but Tally returned no ledgers.")
+            except ImportError:
+                st.error("`pyodbc` is not installed. Run `pip install pyodbc`.")
+            except Exception as exc:  # noqa: BLE001
+                st.session_state.pop("ps_tally_ledgers", None)
+                st.error(f"Could not fetch ledgers from Tally: {exc}")
+                st.caption(
+                    "Check that Tally is open with ODBC enabled and the port "
+                    "matches, and that the driver name / DSN and bitness are right."
+                )
+
+        tally_names = st.session_state.get("ps_tally_ledgers")
+        if not tally_names:
+            st.info("Not checked yet — fetch ledger names above, or skip and "
+                    "convert as-is.")
+            return convert_bytes
+
+        corrections = st.session_state.setdefault("ps_corrections", {})
+        tally_set = set(tally_names)
+        used = collect_ps_ledger_names(file_bytes)
+
+        unresolved = []
+        for name in used:
+            effective = corrections.get(name, name)
+            if effective in tally_set:
+                continue
+            unresolved.append((name, effective, closest_ledger_names(effective, tally_names)))
+
+        st.caption(f"Loaded **{len(tally_names)}** ledger(s) from Tally · "
+                   f"checking **{len(used)}** name(s) used in your file.")
+
+        if corrections:
+            st.caption(f"✏️ {len(corrections)} fix(es) staged — they'll be applied "
+                       "to the file before conversion.")
+
+        if not unresolved:
+            st.success("✅ All ledger names match Tally exactly.")
+            return apply_ledger_corrections(file_bytes, corrections) if corrections else convert_bytes
+
+        # Offer a one-click "apply all suggestions" for names that have one.
+        fixable = [u for u in unresolved if u[2]]
+        if fixable and st.button(f"✨ Apply all {len(fixable)} suggested fix(es)",
+                                 key="ps_chk_fix_all", type="primary"):
+            for name, _eff, sugg in fixable:
+                corrections[name] = sugg[0]
+            st.rerun()
+
+        st.warning(f"⚠️ **{len(unresolved)}** ledger name(s) don't match Tally. "
+                   "Apply a suggested fix or correct them in your Excel.")
+
+        for i, (name, effective, suggestions) in enumerate(unresolved):
+            c1, c2, c3 = st.columns([3, 3, 2])
+            shown = name if effective == name else f"{name}  →  {effective}"
+            c1.markdown(f"❌ `{shown}`")
+            if suggestions:
+                choice = c2.selectbox(
+                    "Closest Tally ledger", suggestions,
+                    key=f"ps_chk_sugg_{i}", label_visibility="collapsed")
+                if c3.button("Fix", key=f"ps_chk_fix_{i}"):
+                    corrections[name] = choice
+                    st.rerun()
+            else:
+                c2.markdown("_no close match found_")
+                c3.write("")
+
+        # Apply whatever has been staged so far so partial fixes still take effect.
+        convert_bytes = apply_ledger_corrections(file_bytes, corrections) if corrections else file_bytes
+
+    return convert_bytes
+
+
+# --------------------------------------------------------------------------
 # UI
 # --------------------------------------------------------------------------
 st.sidebar.title("📒 TALLY ML")
@@ -731,10 +903,16 @@ if uploaded is not None:
         st.info("Conversion is paused until the errors above are resolved.")
         st.stop()
 
+    # ---- Ledger-name check against Tally (Purchase / Sales) -------------
+    convert_bytes = uploaded.getvalue()
+    if tool_name == "Purchase / Sales":
+        convert_bytes = ps_ledger_check_ui(uploaded.getvalue())
+
+    st.subheader("Step 3 — Convert")
     with st.spinner("Converting to Tally XML…"):
         try:
-            # Hand the converter a fresh, seekable copy of the uploaded bytes.
-            result = tool["convert"](io.BytesIO(uploaded.getvalue()))
+            # Hand the converter a fresh, seekable copy of the (corrected) bytes.
+            result = tool["convert"](io.BytesIO(convert_bytes))
 
             xml_final = result.get("xml_final") if result else None
             file_name = (result.get("file_name") if result else None) or "tally"

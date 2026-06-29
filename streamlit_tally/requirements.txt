@@ -5,8 +5,7 @@ pandas>=2.2,<3
 numpy>=1.26,<3
 openpyxl>=3.1
 
-# Optional — only for the "Tally ODBC — Live Data" section, which talks to a
-# running Tally instance over ODBC. Needs the Tally ODBC driver on the host
-# plus a system ODBC manager, so it is left commented to keep the build
-# self-contained. Uncomment (or `pip install pyodbc`) when running next to Tally.
-# pyodbc>=5.1
+# Tally ODBC — used by the "Tally ODBC — Live Data" tool and by the
+# Purchase/Sales ledger-name check. Needs the Tally ODBC driver on the host
+# plus a system ODBC manager, and only works on the same machine as Tally.
+pyodbc>=5.1

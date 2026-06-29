@@ -1,11 +1,16 @@
 @echo off
 REM ==========================================================================
 REM Build / setup the TALLY ML Streamlit app on Windows.
-REM Creates a local virtual environment (.venv) and installs dependencies.
-REM Run this once before using start.bat (re-run it to update packages).
+REM Always does a clean install: removes any existing .venv, recreates it,
+REM and installs dependencies from scratch.
 REM ==========================================================================
 
 cd /d "%~dp0"
+
+if exist ".venv" (
+    echo Removing existing virtual environment for a clean rebuild...
+    rmdir /s /q ".venv"
+)
 
 echo Creating virtual environment (.venv)...
 python -m venv .venv

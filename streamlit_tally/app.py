@@ -1303,13 +1303,14 @@ if uploaded is not None:
         "Purchase / Sales": ("Datetime", "Supplier_Invoice"),
         "Payment / Contra / Receipt": ("DATE_TIME", "PartyLedgerName"),
     }
+    KEY_PREFIX = {"Purchase / Sales": "ps", "Payment / Contra / Receipt": "pcr"}
 
     # ---- Date-format sanity check: warn if Excel auto-converted dates -------
     if tool_name in DATE_COLS:
         date_col, id_col = DATE_COLS[tool_name]
         try:
             conv_df, n_conv = find_excel_converted_dates(
-                uploaded.getvalue(), date_col, id_col)
+                convert_bytes, date_col, id_col)
         except Exception:  # noqa: BLE001
             conv_df, n_conv = None, 0
         if conv_df is not None:
@@ -1325,14 +1326,22 @@ if uploaded is not None:
             with st.expander(f"Show {date_col} cells stored as Excel dates"):
                 st.dataframe(conv_df, use_container_width=True, hide_index=True)
 
-    # ---- Step 2b: Voucher date range check -----------------------------
+    # ---- Step 2b: Fix unreadable dates (blocks conversion until resolved) ---
+    if tool_name in DATE_COLS:
+        date_col, id_col = DATE_COLS[tool_name]
+        convert_bytes, date_blocked = date_resolver_ui(
+            convert_bytes, date_col, id_col, KEY_PREFIX[tool_name])
+        if date_blocked:
+            st.stop()
+
+    # ---- Step 2c: Voucher date range check -----------------------------
     if date_enabled and tool_name in DATE_COLS:
         date_col, id_col = DATE_COLS[tool_name]
-        st.subheader("Step 2b — Voucher date range check")
+        st.subheader("Step 2c — Voucher date range check")
         if date_from and date_to and date_from <= date_to:
             try:
                 oor_df, unparsed_df = find_dates_out_of_range(
-                    uploaded.getvalue(), date_from, date_to, date_col, id_col)
+                    convert_bytes, date_from, date_to, date_col, id_col)
             except Exception as exc:  # noqa: BLE001
                 oor_df, unparsed_df = None, None
                 st.warning(f"Could not validate voucher dates: {exc}")

@@ -100,8 +100,12 @@ def suggest_date(value):
         return None
     # Try the date portion first (drop any trailing time), then the whole value.
     date_part = s.split()[0].replace('-', '/').replace('.', '/')
-    for candidate in (date_part, s):
-        ts = pd.to_datetime(candidate, dayfirst=True, errors='coerce')
+    whole = s.replace('-', '/').replace('.', '/')
+    # ISO order (yyyy first, e.g. Excel-serialised '2025/05/03') must be read
+    # month-before-day; only day-first (dd/mm/yyyy) input uses dayfirst=True.
+    iso = bool(re.match(r'^\d{4}/', date_part))
+    for candidate in (date_part, whole):
+        ts = pd.to_datetime(candidate, dayfirst=not iso, errors='coerce')
         if not pd.isna(ts):
             return ts
     return None

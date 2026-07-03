@@ -511,13 +511,14 @@ def find_dates_out_of_range(file_bytes, date_from, date_to,
     ``DATE_TIME`` for Payment/Contra/Receipt) and ``id_col`` an optional
     identifier column shown in the detail table. Dates are parsed day-first
     (DD/MM/YYYY) with the same robust parser the converter uses, so string /
-    datetime / other cell types all work. Returns ``(detail_df, n_unparsed)``:
-    detail_df lists the offending rows or None if all in range; n_unparsed
-    counts non-blank dates that could not be parsed at all.
+    datetime / other cell types all work. Returns
+    ``(detail_df, unparsed_df)``: detail_df lists rows whose date is outside the
+    range (or None); unparsed_df lists non-blank rows whose date could not be
+    parsed at all (or None).
     """
     df = pd.read_excel(io.BytesIO(file_bytes), sheet_name="TEMPLATE")
     if date_col not in df.columns:
-        return None, 0
+        return None, None
 
     raw = df[date_col]
     non_blank = raw.notna() & (raw.astype(str).str.strip() != "")
@@ -526,17 +527,19 @@ def find_dates_out_of_range(file_bytes, date_from, date_to,
     lo, hi = pd.Timestamp(date_from), pd.Timestamp(date_to)
 
     out_mask = non_blank & parsed.notna() & ((parsed < lo) | (parsed > hi))
-    n_unparsed = int((non_blank & parsed.isna()).sum())
+    unparsed_mask = non_blank & parsed.isna()
 
-    records = []
-    for idx in df.index[out_mask]:
-        rec = {"Row": int(idx) + 2}  # +2: 1-based + header row
-        if id_col and id_col in df.columns:
-            rec[id_col] = df.at[idx, id_col]
-        rec[date_col] = str(df.at[idx, date_col])
-        records.append(rec)
-    detail_df = pd.DataFrame(records) if records else None
-    return detail_df, n_unparsed
+    def _rows(mask):
+        records = []
+        for idx in df.index[mask]:
+            rec = {"Row": int(idx) + 2}  # +2: 1-based + header row
+            if id_col and id_col in df.columns:
+                rec[id_col] = df.at[idx, id_col]
+            rec[date_col] = str(df.at[idx, date_col])
+            records.append(rec)
+        return pd.DataFrame(records) if records else None
+
+    return _rows(out_mask), _rows(unparsed_mask)
 
 
 def find_excel_converted_dates(file_bytes, date_col, id_col=None):
@@ -1209,10 +1212,10 @@ if uploaded is not None:
         st.subheader("Step 2b — Voucher date range check")
         if date_from and date_to and date_from <= date_to:
             try:
-                oor_df, n_unparsed = find_dates_out_of_range(
+                oor_df, unparsed_df = find_dates_out_of_range(
                     uploaded.getvalue(), date_from, date_to, date_col, id_col)
             except Exception as exc:  # noqa: BLE001
-                oor_df, n_unparsed = None, 0
+                oor_df, unparsed_df = None, None
                 st.warning(f"Could not validate voucher dates: {exc}")
 
             span = f"{date_from:%d/%m/%Y} – {date_to:%d/%m/%Y}"
@@ -1223,12 +1226,14 @@ if uploaded is not None:
                     "range, then re-upload."
                 )
                 st.dataframe(oor_df, use_container_width=True, hide_index=True)
-            if n_unparsed:
+            if unparsed_df is not None:
                 st.warning(
-                    f"⚠️ {n_unparsed} row(s) have a {date_col} that couldn't be "
-                    "read — check the date format (DD/MM/YYYY)."
+                    f"⚠️ **{len(unparsed_df)}** row(s) have a {date_col} that "
+                    "couldn't be read — check the date format (DD/MM/YYYY). "
+                    "The affected rows are listed below."
                 )
-            if oor_df is None and not n_unparsed:
+                st.dataframe(unparsed_df, use_container_width=True, hide_index=True)
+            if oor_df is None and unparsed_df is None:
                 st.success(f"✅ All voucher dates fall within {span}.")
             if oor_df is not None:
                 st.info("Conversion is paused until the dates above are fixed.")

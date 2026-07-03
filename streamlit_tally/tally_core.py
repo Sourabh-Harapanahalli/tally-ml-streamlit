@@ -84,6 +84,29 @@ def voucher_date_strings(series, fallback='19980101'):
     return parse_ddmmyyyy(series).dt.strftime('%Y%m%d').fillna(fallback)
 
 
+def suggest_date(value):
+    """Best-effort day-first recovery of a messy date cell -> Timestamp or None.
+
+    Recovers values the strict parser rejects, e.g. ``2025-04-04 17:38:`` (ISO
+    date with a malformed trailing-colon time) or ``4/4/2025 10:30``. Only the
+    date part is used (any time after the first space is dropped); ``-``/``.``
+    separators are normalised and parsing is day-first so DD/MM/YYYY is never
+    read as MM/DD/YYYY. Returns None when no date can be recovered.
+    """
+    if value is None:
+        return None
+    s = str(value).strip()
+    if not s or s.lower() == 'nan':
+        return None
+    # Try the date portion first (drop any trailing time), then the whole value.
+    date_part = s.split()[0].replace('-', '/').replace('.', '/')
+    for candidate in (date_part, s):
+        ts = pd.to_datetime(candidate, dayfirst=True, errors='coerce')
+        if not pd.isna(ts):
+            return ts
+    return None
+
+
 # ==========================================================================
 # Blank template generators -> .xlsx bytes
 # ==========================================================================

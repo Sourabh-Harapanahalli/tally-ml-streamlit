@@ -13,6 +13,7 @@ import difflib
 import html
 import io
 import re
+from datetime import date
 
 import pandas as pd
 import streamlit as st
@@ -572,6 +573,124 @@ def find_excel_converted_dates(file_bytes, date_col, id_col=None):
         rec[date_col] = str(df.at[idx, date_col])
         records.append(rec)
     return pd.DataFrame(records), int(mask.sum())
+
+
+def find_unparsable_dates(file_bytes, date_col, id_col=None):
+    """List non-blank date rows the strict parser can't read, with a suggestion.
+
+    Each item is a dict: ``row_index`` (0-based), ``Row`` (Excel row), ``raw``
+    (the original value), ``suggestion`` (a recovered pandas Timestamp or None)
+    and, if available, ``id`` (the identifier column value).
+    """
+    df = pd.read_excel(io.BytesIO(file_bytes), sheet_name="TEMPLATE")
+    if date_col not in df.columns:
+        return []
+    raw = df[date_col]
+    non_blank = raw.notna() & (raw.astype(str).str.strip() != "")
+    parsed = tally_core.parse_ddmmyyyy(raw)
+    mask = non_blank & parsed.isna()
+
+    rows = []
+    for idx in df.index[mask]:
+        rec = {
+            "row_index": int(idx),
+            "Row": int(idx) + 2,  # +2: 1-based + header row
+            "raw": str(df.at[idx, date_col]),
+            "suggestion": tally_core.suggest_date(df.at[idx, date_col]),
+        }
+        if id_col and id_col in df.columns:
+            rec["id"] = df.at[idx, id_col]
+        rows.append(rec)
+    return rows
+
+
+def apply_date_corrections(file_bytes, date_col, corrections):
+    """Rewrite date cells (keyed by 0-based row index) to 'dd/mm/yyyy' text.
+
+    Only the date column on the TEMPLATE sheet is touched; the cell is stored as
+    Text so the corrected value can't be re-mangled by Excel.
+    """
+    if not corrections:
+        return file_bytes
+    wb = load_workbook(io.BytesIO(file_bytes))
+    ws = wb["TEMPLATE"]
+    headers = [c.value for c in ws[1]]
+    if date_col not in headers:
+        return file_bytes
+    ci = headers.index(date_col) + 1
+    for row_index, value in corrections.items():
+        cell = ws.cell(row=int(row_index) + 2, column=ci)
+        cell.value = value
+        cell.number_format = "@"
+    out = io.BytesIO()
+    wb.save(out)
+    return out.getvalue()
+
+
+def date_resolver_ui(file_bytes, date_col, id_col, key_prefix):
+    """Confirm/repair unreadable dates before conversion (blocks until clean).
+
+    Suggests a compatible DD/MM/YYYY value for each unreadable date and offers a
+    calendar picker to override it. Returns ``(convert_bytes, blocked)``;
+    ``blocked`` stays True until every unreadable date has been resolved.
+    """
+    rows = find_unparsable_dates(file_bytes, date_col, id_col)
+    if not rows:
+        return file_bytes, False
+
+    corr_key = f"{key_prefix}_datecorr"
+    corrections = st.session_state.setdefault(corr_key, {})
+    n_sugg = sum(1 for r in rows if r["suggestion"] is not None)
+
+    st.subheader("Step 2b — Fix unreadable dates")
+    st.warning(
+        f"⚠️ **{len(rows)}** date(s) can't be read as DD/MM/YYYY. Confirm the "
+        f"suggested fix or pick a date from the calendar. **Conversion is "
+        "paused until every date is resolved.**"
+    )
+
+    # Fast path: accept every suggestion at once.
+    if n_sugg and st.button(f"✨ Apply all {n_sugg} suggested date(s)",
+                            key=f"{key_prefix}_date_all", type="primary"):
+        for r in rows:
+            if r["suggestion"] is not None:
+                corrections[r["row_index"]] = r["suggestion"].strftime("%d/%m/%Y")
+        st.rerun()
+
+    # Manual review / override, one calendar per row.
+    with st.form(f"{key_prefix}_dateform"):
+        st.caption("Original value → confirm or change the date, then Apply.")
+        picks = {}
+        for i, r in enumerate(rows):
+            c0, c1, c2 = st.columns([1, 3, 2])
+            c0.markdown(f"Row **{r['Row']}**")
+            ident = f"**{r['id']}**  " if r.get("id") else ""
+            c1.markdown(f"{ident}`{r['raw']}`")
+            staged = corrections.get(r["row_index"])
+            if staged:
+                default = pd.to_datetime(staged, dayfirst=True).date()
+            elif r["suggestion"] is not None:
+                default = r["suggestion"].date()
+            else:
+                default = None
+            picks[r["row_index"]] = c2.date_input(
+                "Date", value=default, format="DD/MM/YYYY",
+                min_value=date(2000, 1, 1), max_value=date(2100, 12, 31),
+                key=f"{key_prefix}_dp_{i}", label_visibility="collapsed")
+        if st.form_submit_button("✅ Apply these dates"):
+            for ri, d in picks.items():
+                if d is not None:
+                    corrections[ri] = d.strftime("%d/%m/%Y")
+            st.rerun()
+
+    convert_bytes = apply_date_corrections(file_bytes, date_col, corrections)
+    remaining = find_unparsable_dates(convert_bytes, date_col, id_col)
+    if remaining:
+        st.info(f"⏸️ {len(remaining)} date(s) still unresolved — apply a "
+                "suggestion or pick a date above to continue.")
+        return convert_bytes, True
+    st.success("✅ All dates are now readable.")
+    return convert_bytes, False
 
 
 def closest_ledger_names(name, tally_names, n=6):

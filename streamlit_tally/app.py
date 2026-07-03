@@ -460,23 +460,26 @@ def _norm_name(s):
     return " ".join(str(s).lower().split())
 
 
-def find_dates_out_of_range(file_bytes, date_from, date_to):
-    """Find Purchase/Sales voucher dates outside the [date_from, date_to] range.
+def find_dates_out_of_range(file_bytes, date_from, date_to,
+                            date_col="Datetime", id_col="Supplier_Invoice"):
+    """Find voucher dates outside the [date_from, date_to] range.
 
-    Dates are parsed day-first to match the converter. Returns
-    ``(detail_df, n_unparsed)``: detail_df lists the offending rows (Row,
-    Supplier_Invoice, Datetime) or None if all in range; n_unparsed counts
-    non-blank dates that could not be parsed at all.
+    ``date_col`` is the date column to check (``Datetime`` for Purchase/Sales,
+    ``DATE_TIME`` for Payment/Contra/Receipt) and ``id_col`` an optional
+    identifier column shown in the detail table. Dates are parsed day-first
+    (DD/MM/YYYY) with the same robust parser the converter uses, so string /
+    datetime / other cell types all work. Returns ``(detail_df, n_unparsed)``:
+    detail_df lists the offending rows or None if all in range; n_unparsed
+    counts non-blank dates that could not be parsed at all.
     """
     df = pd.read_excel(io.BytesIO(file_bytes), sheet_name="TEMPLATE")
-    if "Datetime" not in df.columns:
+    if date_col not in df.columns:
         return None, 0
 
-    raw = df["Datetime"]
+    raw = df[date_col]
     non_blank = raw.notna() & (raw.astype(str).str.strip() != "")
-    # Parse day-first per-element (format="mixed") so both "3/4/2025" and
-    # "14-04-2025" in the same column parse correctly — matches the converter.
-    parsed = pd.to_datetime(raw, dayfirst=True, format="mixed", errors="coerce")
+    # Day-first (DD/MM/YYYY), matching the converter exactly.
+    parsed = tally_core.parse_ddmmyyyy(raw)
     lo, hi = pd.Timestamp(date_from), pd.Timestamp(date_to)
 
     out_mask = non_blank & parsed.notna() & ((parsed < lo) | (parsed > hi))
@@ -484,12 +487,11 @@ def find_dates_out_of_range(file_bytes, date_from, date_to):
 
     records = []
     for idx in df.index[out_mask]:
-        records.append({
-            "Row": int(idx) + 2,  # +2: 1-based + header row
-            "Supplier_Invoice": (df.at[idx, "Supplier_Invoice"]
-                                 if "Supplier_Invoice" in df.columns else ""),
-            "Datetime": str(df.at[idx, "Datetime"]),
-        })
+        rec = {"Row": int(idx) + 2}  # +2: 1-based + header row
+        if id_col and id_col in df.columns:
+            rec[id_col] = df.at[idx, id_col]
+        rec[date_col] = str(df.at[idx, date_col])
+        records.append(rec)
     detail_df = pd.DataFrame(records) if records else None
     return detail_df, n_unparsed
 
@@ -555,16 +557,17 @@ def odbc_connection_form(prefix):
     return build_odbc_conn_str("Driver", "", driver, host, int(port))
 
 
-def ps_date_range_ui():
-    """Optional voucher-date range gate for Purchase / Sales (before upload).
+def date_range_ui(key_prefix):
+    """Optional voucher-date range gate (before upload).
 
-    Returns ``(enabled, date_from, date_to)``. When enabled, every voucher's
-    Datetime must fall within the range or conversion is blocked.
+    ``key_prefix`` namespaces the Streamlit widget keys so each converter keeps
+    its own state. Returns ``(enabled, date_from, date_to)``; when enabled,
+    every voucher's date must fall within the range or conversion is blocked.
     """
     st.subheader("Step 1b — Voucher date range (optional)")
     enabled = st.checkbox(
         "Restrict voucher dates to a range (your Tally data period)",
-        key="ps_date_enable",
+        key=f"{key_prefix}_date_enable",
         help="Tally rejects vouchers dated outside the company's open period. "
              "Turn this on to catch out-of-range dates before converting.",
     )
@@ -572,8 +575,10 @@ def ps_date_range_ui():
         return False, None, None
 
     c1, c2 = st.columns(2)
-    date_from = c1.date_input("From date", key="ps_date_from", format="DD/MM/YYYY")
-    date_to = c2.date_input("To date", key="ps_date_to", format="DD/MM/YYYY")
+    date_from = c1.date_input("From date", key=f"{key_prefix}_date_from",
+                              format="DD/MM/YYYY")
+    date_to = c2.date_input("To date", key=f"{key_prefix}_date_to",
+                            format="DD/MM/YYYY")
     if date_from and date_to and date_from > date_to:
         st.warning("‘From date’ is after ‘To date’ — please fix the range.")
     return True, date_from, date_to
@@ -979,10 +984,12 @@ with st.expander("👀 See an example (filled template)"):
         except Exception as exc:  # noqa: BLE001
             st.warning(f"Could not generate the example file: {exc}")
 
-# ---- Optional voucher date range (Purchase / Sales), before upload -----
+# ---- Optional voucher date range, before upload ------------------------
 date_enabled, date_from, date_to = (False, None, None)
 if tool_name == "Purchase / Sales":
-    date_enabled, date_from, date_to = ps_date_range_ui()
+    date_enabled, date_from, date_to = date_range_ui("ps")
+elif tool_name == "Payment / Contra / Receipt":
+    date_enabled, date_from, date_to = date_range_ui("pcr")
 
 st.divider()
 
@@ -1065,13 +1072,18 @@ if uploaded is not None:
         if ledger_blocked:
             st.stop()
 
-    # ---- Step 2b: Voucher date range check (Purchase / Sales) ----------
-    if tool_name == "Purchase / Sales" and date_enabled:
+    # ---- Step 2b: Voucher date range check -----------------------------
+    DATE_COLS = {
+        "Purchase / Sales": ("Datetime", "Supplier_Invoice"),
+        "Payment / Contra / Receipt": ("DATE_TIME", "PartyLedgerName"),
+    }
+    if date_enabled and tool_name in DATE_COLS:
+        date_col, id_col = DATE_COLS[tool_name]
         st.subheader("Step 2b — Voucher date range check")
         if date_from and date_to and date_from <= date_to:
             try:
                 oor_df, n_unparsed = find_dates_out_of_range(
-                    uploaded.getvalue(), date_from, date_to)
+                    uploaded.getvalue(), date_from, date_to, date_col, id_col)
             except Exception as exc:  # noqa: BLE001
                 oor_df, n_unparsed = None, 0
                 st.warning(f"Could not validate voucher dates: {exc}")
@@ -1086,7 +1098,7 @@ if uploaded is not None:
                 st.dataframe(oor_df, use_container_width=True, hide_index=True)
             if n_unparsed:
                 st.warning(
-                    f"⚠️ {n_unparsed} row(s) have a Datetime that couldn't be "
+                    f"⚠️ {n_unparsed} row(s) have a {date_col} that couldn't be "
                     "read — check the date format (DD/MM/YYYY)."
                 )
             if oor_df is None and not n_unparsed:

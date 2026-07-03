@@ -56,6 +56,34 @@ def _escape_xml_columns(df):
 
 
 # ==========================================================================
+# Date parsing helpers
+# ==========================================================================
+def parse_ddmmyyyy(series):
+    """Parse a voucher-date column to pandas Timestamps, ALWAYS day-first.
+
+    The date format is assumed to be **DD/MM/YYYY** regardless of how the cell
+    is stored. It works whether the Excel cells are real datetimes, pandas
+    Timestamps, or strings using ``/``, ``-`` or ``.`` separators with single-
+    or double-digit day and month (e.g. ``1/4/2025``, ``01-04-2025``,
+    ``1.4.2025``). Unparseable values become ``NaT``.
+    """
+    # Real datetime cells are already unambiguous — use them as-is.
+    if pd.api.types.is_datetime64_any_dtype(series):
+        return pd.to_datetime(series, errors='coerce')
+    # Otherwise coerce to trimmed strings (covers object columns holding a mix
+    # of strings / Timestamps / numbers), normalise '-' and '.' separators to
+    # '/', then parse day-first so DD/MM/YYYY is never read as MM/DD/YYYY.
+    text = (series.astype(str).str.strip()
+            .str.replace(r'[.\-]', '/', regex=True))
+    return pd.to_datetime(text, dayfirst=True, format='mixed', errors='coerce')
+
+
+def voucher_date_strings(series, fallback='19980101'):
+    """Day-first dates -> Tally ``YYYYMMDD`` strings; unparseable -> fallback."""
+    return parse_ddmmyyyy(series).dt.strftime('%Y%m%d').fillna(fallback)
+
+
+# ==========================================================================
 # Blank template generators -> .xlsx bytes
 # ==========================================================================
 def _style_widths(wb):
@@ -353,14 +381,10 @@ class Purchase_Sales:
             # default_date = pd.to_datetime('1998-01-01')  # Define your default date
             # data['DATE'] = data['DATE'].fillna(default_date)
 
-            # Parse voucher dates day-first (DD/MM/YYYY) in one pass, handling
-            # either "/" or "-" separators and single- or double-digit day/month
-            # (and real datetime cells). strftime guarantees a zero-padded
-            # YYYYMMDD; anything unparseable falls back to 19980101.
-            data['DATE'] = pd.to_datetime(
-                data['Datetime'], dayfirst=True, format='mixed', errors='coerce'
-            ).dt.strftime('%Y%m%d')
-            data['DATE'] = data['DATE'].fillna('19980101')
+            # Parse voucher dates day-first (DD/MM/YYYY), handling string, real
+            # datetime or other cell types. Unparseable values fall back to
+            # 19980101.
+            data['DATE'] = voucher_date_strings(data['Datetime'])
             data=data.fillna('')
 
             # data['Diff']=(data['Dr_Amount']+data['Dr_AmountOne'].replace('', 0)-data['CR_TOTAL']-data['Cr_AmountThree'].replace('', 0)).round(4)
@@ -2400,13 +2424,10 @@ class Pay_Con_Rec:
         if uploaded_file:
             data=pd.read_excel(uploaded_file,sheet_name='TEMPLATE')
 
-            # Parse day-first (DD/MM/YYYY) in one pass, handling "/" or "-"
-            # separators and single- or double-digit day/month. strftime gives a
-            # zero-padded YYYYMMDD; unparseable values fall back to 19980101.
-            data['DATE'] = pd.to_datetime(
-                data['DATE_TIME'], dayfirst=True, format='mixed', errors='coerce'
-            ).dt.strftime('%Y%m%d')
-            data['DATE'] = data['DATE'].fillna('19980101')
+            # Parse voucher dates day-first (DD/MM/YYYY), handling string, real
+            # datetime or other cell types. Unparseable values fall back to
+            # 19980101.
+            data['DATE'] = voucher_date_strings(data['DATE_TIME'])
 
             for x in data:
                 if ('int' in str(data[x].dtypes) or 'float' in str(data[x].dtypes))and 'Supplier_Invoice' not in x:
@@ -2439,18 +2460,23 @@ class Pay_Con_Rec:
                 </BODY>
                 </ENVELOPE>
                 '''
-            xml=''
+            # perf: build with a list + one join (O(n)) instead of repeated
+            # string concatenation (O(n^2)), and read each row once into `r`
+            # instead of re-indexing data.iloc[row] for every field — same
+            # approach used by the Purchase/Sales converter.
+            xml_parts = []
 
             for row in range(len(data)):
-                xml=xml+'''
+                r = data.iloc[row]
+                xml_parts.append('''
                     <TALLYMESSAGE xmlns:UDF="TallyUDF">
-                         <VOUCHER REMOTEID="" VCHKEY="" VCHTYPE="'''+str(data.iloc[row]['Vch_Type'])+''' " ACTION="Create" OBJVIEW="Accounting Voucher View">
-                          <DATE>'''+str(data.iloc[row]['DATE'])+'''</DATE>
+                         <VOUCHER REMOTEID="" VCHKEY="" VCHTYPE="'''+str(r['Vch_Type'])+''' " ACTION="Create" OBJVIEW="Accounting Voucher View">
+                          <DATE>'''+str(r['DATE'])+'''</DATE>
                           <GUID></GUID>
-                          <NARRATION>'''+str(data.iloc[row]['Narration'])+'''</NARRATION>
-                          <VOUCHERTYPENAME>'''+str(data.iloc[row]['Vch_Type'])+''' </VOUCHERTYPENAME>
+                          <NARRATION>'''+str(r['Narration'])+'''</NARRATION>
+                          <VOUCHERTYPENAME>'''+str(r['Vch_Type'])+''' </VOUCHERTYPENAME>
                           <VOUCHERNUMBER>1</VOUCHERNUMBER>
-                          <PARTYLEDGERNAME>'''+str(data.iloc[row]['PartyLedgerName'])+'''</PARTYLEDGERNAME>
+                          <PARTYLEDGERNAME>'''+str(r['PartyLedgerName'])+'''</PARTYLEDGERNAME>
                           <CSTFORMISSUETYPE/>
                           <CSTFORMRECVTYPE/>
                           <FBTPAYMENTTYPE>Default</FBTPAYMENTTYPE>
@@ -2462,7 +2488,7 @@ class Pay_Con_Rec:
                           <AUDITED>No</AUDITED>
                           <FORJOBCOSTING>No</FORJOBCOSTING>
                           <ISOPTIONAL>No</ISOPTIONAL>
-                          <EFFECTIVEDATE>'''+str(data.iloc[row]['DATE'])+'''</EFFECTIVEDATE>
+                          <EFFECTIVEDATE>'''+str(r['DATE'])+'''</EFFECTIVEDATE>
                           <USEFOREXCISE>No</USEFOREXCISE>
                           <ISFORJOBWORKIN>No</ISFORJOBWORKIN>
                           <ALLOWCONSUMPTION>No</ALLOWCONSUMPTION>
@@ -2536,8 +2562,8 @@ class Pay_Con_Rec:
                            <OLDAUDITENTRYIDS.LIST TYPE="Number">
                             <OLDAUDITENTRYIDS>-1</OLDAUDITENTRYIDS>
                            </OLDAUDITENTRYIDS.LIST>
-                          <NARRATION>'''+str(data.iloc[row]['NARRATION_1'])+'''</NARRATION>
-                           <LEDGERNAME>'''+str(data.iloc[row]['Dr_LedgerName'])+'''</LEDGERNAME>
+                          <NARRATION>'''+str(r['NARRATION_1'])+'''</NARRATION>
+                           <LEDGERNAME>'''+str(r['Dr_LedgerName'])+'''</LEDGERNAME>
                            <GSTCLASS/>
                            <ISDEEMEDPOSITIVE>Yes</ISDEEMEDPOSITIVE>
                            <LEDGERFROMITEM>No</LEDGERFROMITEM>
@@ -2545,8 +2571,8 @@ class Pay_Con_Rec:
                            <ISPARTYLEDGER>No</ISPARTYLEDGER>
                            <ISLASTDEEMEDPOSITIVE>Yes</ISLASTDEEMEDPOSITIVE>
                            <ISCAPVATTAXALTERED>No</ISCAPVATTAXALTERED>
-                           <AMOUNT>-'''+str(data.iloc[row]['Dr_Amount'])+'''</AMOUNT>
-                           <VATEXPAMOUNT>-'''+str(data.iloc[row]['Dr_Amount'])+'''</VATEXPAMOUNT>
+                           <AMOUNT>-'''+str(r['Dr_Amount'])+'''</AMOUNT>
+                           <VATEXPAMOUNT>-'''+str(r['Dr_Amount'])+'''</VATEXPAMOUNT>
                            <SERVICETAXDETAILS.LIST>       </SERVICETAXDETAILS.LIST>
                            <BANKALLOCATIONS.LIST>       </BANKALLOCATIONS.LIST>
                            <BILLALLOCATIONS.LIST>       </BILLALLOCATIONS.LIST>
@@ -2575,8 +2601,8 @@ class Pay_Con_Rec:
                            <OLDAUDITENTRYIDS.LIST TYPE="Number">
                             <OLDAUDITENTRYIDS>-1</OLDAUDITENTRYIDS>
                            </OLDAUDITENTRYIDS.LIST>
-                           <NARRATION>'''+str(data.iloc[row]['NARRATION_2'])+'''</NARRATION>
-                           <LEDGERNAME>'''+str(data.iloc[row]['Cr_LedgerName'])+'''</LEDGERNAME>
+                           <NARRATION>'''+str(r['NARRATION_2'])+'''</NARRATION>
+                           <LEDGERNAME>'''+str(r['Cr_LedgerName'])+'''</LEDGERNAME>
                            <GSTCLASS/>
                            <ISDEEMEDPOSITIVE>No</ISDEEMEDPOSITIVE>
                            <LEDGERFROMITEM>No</LEDGERFROMITEM>
@@ -2584,8 +2610,8 @@ class Pay_Con_Rec:
                            <ISPARTYLEDGER>Yes</ISPARTYLEDGER>
                            <ISLASTDEEMEDPOSITIVE>No</ISLASTDEEMEDPOSITIVE>
                            <ISCAPVATTAXALTERED>No</ISCAPVATTAXALTERED>
-                           <AMOUNT>'''+str(data.iloc[row]['Cr_Amount'])+'''</AMOUNT>
-                           <VATEXPAMOUNT>'''+str(data.iloc[row]['Cr_Amount'])+'''</VATEXPAMOUNT>
+                           <AMOUNT>'''+str(r['Cr_Amount'])+'''</AMOUNT>
+                           <VATEXPAMOUNT>'''+str(r['Cr_Amount'])+'''</VATEXPAMOUNT>
                            <SERVICETAXDETAILS.LIST>       </SERVICETAXDETAILS.LIST>
                            <BANKALLOCATIONS.LIST>       </BANKALLOCATIONS.LIST>
                            <BILLALLOCATIONS.LIST>       </BILLALLOCATIONS.LIST>
@@ -2614,9 +2640,10 @@ class Pay_Con_Rec:
                           <ATTDRECORDS.LIST>      </ATTDRECORDS.LIST>
                           <TEMPGSTRATEDETAILS.LIST>      </TEMPGSTRATEDETAILS.LIST>
                          </VOUCHER>
-                        </TALLYMESSAGE>'''
-         
+                        </TALLYMESSAGE>''')
 
+
+            xml = ''.join(xml_parts)
             xml_final=xml_begin+xml+xml_end
             csv_string = data.to_csv(index=False)
             return {'xml_final': xml_final, 'data_csv': csv_string, 'file_name': 'Pay_Con_Rec'}

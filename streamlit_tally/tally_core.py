@@ -23,6 +23,39 @@ from openpyxl.styles import Alignment, Border, PatternFill, Side
 
 
 # ==========================================================================
+# XML escaping helpers
+# ==========================================================================
+def _xml_escape(value):
+    """Escape XML special characters so a value can be safely embedded as XML
+    text content.
+
+    Tally ERP rejects the whole import when a raw ``&`` (or ``<`` / ``>``)
+    appears inside a ledger name, narration, etc. ``&`` must be escaped first
+    so the ``&`` introduced by ``<``/``>`` escaping is not doubled.
+    """
+    s = str(value)
+    return (
+        s.replace('&', '&amp;')
+        .replace('<', '&lt;')
+        .replace('>', '&gt;')
+    )
+
+
+def _escape_xml_columns(df):
+    """Escape XML special characters in every text (object) column in-place.
+
+    Only string cells are touched, so numeric/date columns and blanks are left
+    unchanged. This guards every ledger name / narration feeding the XML
+    against ``&`` without having to enumerate each field.
+    """
+    for col in df.select_dtypes(include=['object']).columns:
+        df.loc[:, col] = df[col].map(
+            lambda v: _xml_escape(v) if isinstance(v, str) else v
+        )
+    return df
+
+
+# ==========================================================================
 # Blank template generators -> .xlsx bytes
 # ==========================================================================
 def _style_widths(wb):
@@ -168,8 +201,10 @@ class Purchase_Sales:
             
                 
             data=data.fillna('')
-            data['PartyLedgerName'] = data['PartyLedgerName'].str.replace('&', '&amp;', regex=False)
-            data['Dr_LedgerName'] = data['Dr_LedgerName'].str.replace('&', '&amp;', regex=False)
+            # Escape XML special characters (e.g. '&' in ledger names /
+            # narrations) across all text columns so the import is not rejected
+            # by Tally ERP.
+            data = _escape_xml_columns(data)
 
             # data['GST_5'] = pd.to_numeric(data['GST_5'], errors='coerce')
             # data['GST_12'] = pd.to_numeric(data['GST_5'], errors='coerce')
@@ -352,7 +387,7 @@ class Purchase_Sales:
                 </ENVELOPE>
                 '''
             # --- perf: precompute row-independent values once (output unchanged) ---
-            _m = {k: str(master.loc[k].iloc[0]) for k in (
+            _m = {k: _xml_escape(master.loc[k].iloc[0]) for k in (
                 'GST_18', 'GST_5', 'GST_12', 'GST_28',
                 '2.5_CGST', '6_CGST', '9_CGST', '14_CGST',
                 '2.5_SGST', '6_SGST', '9_SGST', '14_SGST',
@@ -2378,6 +2413,10 @@ class Pay_Con_Rec:
                     data[x]=data[x].astype("float").round(2)
 
             data=data.fillna('')
+            # Escape XML special characters (e.g. '&' in ledger names /
+            # narrations) across all text columns so the import is not rejected
+            # by Tally ERP.
+            data = _escape_xml_columns(data)
 
             xml_begin= '''
                 <ENVELOPE>

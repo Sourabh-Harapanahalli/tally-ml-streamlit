@@ -430,6 +430,8 @@ def list_collection_columns(conn_str, table):
 # Dr_LedgerName columns, suggesting the closest real name for any mismatch.
 # --------------------------------------------------------------------------
 PS_LEDGER_COLUMNS = ["PartyLedgerName", "Dr_LedgerName"]
+# Payment / Contra / Receipt also has a credit-side ledger.
+PCR_LEDGER_COLUMNS = ["PartyLedgerName", "Dr_LedgerName", "Cr_LedgerName"]
 
 
 def fetch_tally_ledger_names(conn_str):
@@ -440,11 +442,11 @@ def fetch_tally_ledger_names(conn_str):
     return [str(v).strip() for v in df.iloc[:, 0].tolist() if str(v).strip()]
 
 
-def collect_ps_ledger_names(file_bytes):
-    """Sorted unique non-blank PartyLedgerName / Dr_LedgerName values used."""
+def collect_ledger_names(file_bytes, columns):
+    """Sorted unique non-blank ledger-name values used in the given columns."""
     df = pd.read_excel(io.BytesIO(file_bytes), sheet_name="TEMPLATE").fillna("")
     names = set()
-    for col in PS_LEDGER_COLUMNS:
+    for col in columns:
         if col in df.columns:
             for v in df[col].astype(str):
                 v = v.strip()
@@ -516,16 +518,16 @@ def closest_ledger_names(name, tally_names, n=6):
     return [cand for _score, cand in scored[:n]]
 
 
-def apply_ledger_corrections(file_bytes, corrections):
-    """Return new .xlsx bytes with PartyLedgerName / Dr_LedgerName cells renamed.
+def apply_ledger_corrections(file_bytes, corrections, columns=PS_LEDGER_COLUMNS):
+    """Return new .xlsx bytes with the given ledger columns' cells renamed.
 
-    Only the two ledger columns on the TEMPLATE sheet are touched; everything
-    else (including the MASTER_LEDGER_NAME_LINK sheet) is preserved verbatim.
+    Only the named ledger columns on the TEMPLATE sheet are touched; everything
+    else (including any MASTER_LEDGER_NAME_LINK sheet) is preserved verbatim.
     """
     wb = load_workbook(io.BytesIO(file_bytes))
     ws = wb["TEMPLATE"]
     headers = [c.value for c in ws[1]]
-    for col in PS_LEDGER_COLUMNS:
+    for col in columns:
         if col in headers:
             ci = headers.index(col) + 1
             for r in range(2, ws.max_row + 1):
@@ -577,8 +579,12 @@ def ps_date_range_ui():
     return True, date_from, date_to
 
 
-def ps_ledger_check_ui(file_bytes):
-    """Verify Purchase/Sales ledger names against Tally, before conversion.
+def ledger_check_ui(file_bytes, columns, key_prefix, columns_label):
+    """Verify a converter's ledger names against Tally (ODBC), before conversion.
+
+    ``columns`` are the TEMPLATE columns to validate, ``key_prefix`` namespaces
+    the Streamlit widget/session keys so multiple converters don't collide, and
+    ``columns_label`` is the human-readable list shown in the expander header.
 
     Returns ``(convert_bytes, blocked)``:
 
@@ -588,8 +594,10 @@ def ps_ledger_check_ui(file_bytes):
       user hasn't chosen to ignore. The caller must not convert when True.
     """
     convert_bytes = file_bytes
+    ledgers_key = f"{key_prefix}_tally_ledgers"
+    corr_key = f"{key_prefix}_corrections"
     st.subheader("Step 2a — Verify ledger names against Tally")
-    with st.expander("🔗 Check PartyLedgerName / Dr_LedgerName against your Tally company",
+    with st.expander(f"🔗 Check {columns_label} against your Tally company",
                      expanded=True):
         st.caption(
             "Tally imports are **case-sensitive** and need the exact ledger "
@@ -597,32 +605,33 @@ def ps_ledger_check_ui(file_bytes):
             "Connect to a running Tally (ODBC, same machine) to catch problems "
             "before converting."
         )
-        conn_str = odbc_connection_form("ps_chk")
+        conn_str = odbc_connection_form(f"{key_prefix}_chk")
         st.caption(f"Connection string: `{conn_str}`")
 
-        if st.button("🔍 Fetch ledger names from Tally & check", key="ps_chk_fetch"):
+        if st.button("🔍 Fetch ledger names from Tally & check",
+                     key=f"{key_prefix}_chk_fetch"):
             try:
                 names = fetch_tally_ledger_names(conn_str)
-                st.session_state["ps_tally_ledgers"] = names
-                st.session_state["ps_corrections"] = {}
+                st.session_state[ledgers_key] = names
+                st.session_state[corr_key] = {}
                 if not names:
                     st.warning("Connected, but Tally returned no ledgers.")
             except ImportError:
                 st.error("`pyodbc` is not installed. Run `pip install pyodbc`.")
             except Exception as exc:  # noqa: BLE001
-                st.session_state.pop("ps_tally_ledgers", None)
+                st.session_state.pop(ledgers_key, None)
                 st.error(f"Could not fetch ledgers from Tally: {exc}")
                 st.caption(
                     "Check that Tally is open with ODBC enabled and the port "
                     "matches, and that the driver name / DSN and bitness are right."
                 )
 
-        tally_names = st.session_state.get("ps_tally_ledgers")
+        tally_names = st.session_state.get(ledgers_key)
         if not tally_names:
             # Conversion waits until the check is run — unless explicitly skipped.
             skip = st.checkbox(
                 "Skip Tally check (convert without validating ledger names)",
-                key="ps_chk_skip")
+                key=f"{key_prefix}_chk_skip")
             if skip:
                 st.caption("⚠️ Ledger names will NOT be validated against Tally.")
                 return convert_bytes, False
@@ -630,9 +639,9 @@ def ps_ledger_check_ui(file_bytes):
                     "to validate, or tick “Skip Tally check”.")
             return convert_bytes, True
 
-        corrections = st.session_state.setdefault("ps_corrections", {})
+        corrections = st.session_state.setdefault(corr_key, {})
         tally_set = set(tally_names)
-        used = collect_ps_ledger_names(file_bytes)
+        used = collect_ledger_names(file_bytes, columns)
 
         unresolved = []
         for name in used:
@@ -650,13 +659,14 @@ def ps_ledger_check_ui(file_bytes):
 
         if not unresolved:
             st.success("✅ All ledger names match Tally — converting below.")
-            corrected = apply_ledger_corrections(file_bytes, corrections) if corrections else convert_bytes
+            corrected = (apply_ledger_corrections(file_bytes, corrections, columns)
+                         if corrections else convert_bytes)
             return corrected, False
 
         # Offer a one-click "apply all suggestions" for names that have one.
         fixable = [u for u in unresolved if u[2]]
         if fixable and st.button(f"✨ Apply all {len(fixable)} suggested fix(es)",
-                                 key="ps_chk_fix_all", type="primary"):
+                                 key=f"{key_prefix}_chk_fix_all", type="primary"):
             for name, _eff, sugg in fixable:
                 corrections[name] = sugg[0]
             st.rerun()
@@ -679,7 +689,7 @@ def ps_ledger_check_ui(file_bytes):
             # Case-INSENSITIVE substring search; the list keeps original case
             # and narrows as you type (press Enter to apply the filter).
             query = sc1.text_input(
-                "Search", key=f"ps_chk_search_{i}",
+                "Search", key=f"{key_prefix}_chk_search_{i}",
                 placeholder="🔎 search (case-insensitive)…",
                 label_visibility="collapsed")
             if query:
@@ -693,24 +703,39 @@ def ps_ledger_check_ui(file_bytes):
 
             choice = sc2.selectbox(
                 "Closest Tally ledger", filtered,
-                key=f"ps_chk_sugg_{i}", label_visibility="collapsed")
-            if sc3.button("Fix", key=f"ps_chk_fix_{i}"):
+                key=f"{key_prefix}_chk_sugg_{i}", label_visibility="collapsed")
+            if sc3.button("Fix", key=f"{key_prefix}_chk_fix_{i}"):
                 corrections[name] = choice
                 st.rerun()
 
         # Apply whatever has been staged so far so partial fixes still take effect.
-        convert_bytes = apply_ledger_corrections(file_bytes, corrections) if corrections else file_bytes
+        convert_bytes = (apply_ledger_corrections(file_bytes, corrections, columns)
+                         if corrections else file_bytes)
 
         # Conversion stays paused while names are unresolved, unless the user
         # explicitly opts to convert anyway (e.g. ledgers created later in Tally).
         convert_anyway = st.checkbox(
             "Convert anyway, ignoring the unmatched names above",
-            key="ps_chk_convert_anyway")
+            key=f"{key_prefix}_chk_convert_anyway")
         if not convert_anyway:
             st.info("⏸️ Conversion is paused until every name is fixed "
                     "(or tick “Convert anyway”).")
 
     return convert_bytes, (not convert_anyway)
+
+
+def ps_ledger_check_ui(file_bytes):
+    """Ledger-name check for Purchase / Sales (PartyLedgerName / Dr_LedgerName)."""
+    return ledger_check_ui(
+        file_bytes, PS_LEDGER_COLUMNS, "ps",
+        "PartyLedgerName / Dr_LedgerName")
+
+
+def pcr_ledger_check_ui(file_bytes):
+    """Ledger-name check for Payment / Contra / Receipt (Party / Dr / Cr)."""
+    return ledger_check_ui(
+        file_bytes, PCR_LEDGER_COLUMNS, "pcr",
+        "PartyLedgerName / Dr_LedgerName / Cr_LedgerName")
 
 
 # --------------------------------------------------------------------------
@@ -1029,10 +1054,14 @@ if uploaded is not None:
         st.info("Conversion is paused until the errors above are resolved.")
         st.stop()
 
-    # ---- Step 2a: Ledger-name check against Tally (Purchase / Sales) ----
+    # ---- Step 2a: Ledger-name check against Tally --------------------------
     convert_bytes = uploaded.getvalue()
     if tool_name == "Purchase / Sales":
         convert_bytes, ledger_blocked = ps_ledger_check_ui(uploaded.getvalue())
+        if ledger_blocked:
+            st.stop()
+    elif tool_name == "Payment / Contra / Receipt":
+        convert_bytes, ledger_blocked = pcr_ledger_check_ui(uploaded.getvalue())
         if ledger_blocked:
             st.stop()
 

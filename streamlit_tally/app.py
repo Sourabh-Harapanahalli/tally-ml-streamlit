@@ -455,6 +455,49 @@ def collect_ledger_names(file_bytes, columns):
     return sorted(names)
 
 
+# Dr/Cr ledger columns that must never be blank, per converter.
+REQUIRED_LEDGER_COLUMNS = {
+    "Purchase / Sales": ["Dr_LedgerName"],
+    "Payment / Contra / Receipt": ["Dr_LedgerName", "Cr_LedgerName"],
+}
+
+
+def find_empty_ledger_rows(file_bytes, columns):
+    """Find rows where any of the given Dr/Cr ledger columns is blank.
+
+    An empty Dr/Cr ledger name produces ``<LEDGERNAME></LEDGERNAME>`` in the
+    XML, which Tally rejects. Fully-blank rows (every checked column empty) are
+    ignored — they are just unused template rows, not partial data. Returns
+    ``(detail_df, cols_checked)``: detail_df lists the offending rows (Row +
+    each checked column) or None if none are blank.
+    """
+    df = pd.read_excel(io.BytesIO(file_bytes), sheet_name="TEMPLATE").fillna("")
+    cols = [c for c in columns if c in df.columns]
+    if not cols:
+        return None, cols
+
+    # A blank in any required ledger column is a problem...
+    any_blank = pd.Series(False, index=df.index)
+    for c in cols:
+        any_blank = any_blank | (df[c].astype(str).str.strip() == "")
+
+    # ...unless the ENTIRE row is empty (an unused template row, not a voucher).
+    row_all_blank = (df.astype(str).apply(lambda s: s.str.strip())
+                     == "").all(axis=1)
+
+    bad_mask = any_blank & ~row_all_blank
+    if not bad_mask.any():
+        return None, cols
+
+    records = []
+    for idx in df.index[bad_mask]:
+        rec = {"Row": int(idx) + 2}  # +2: 1-based + header row
+        for c in cols:
+            rec[c] = df.at[idx, c]
+        records.append(rec)
+    return pd.DataFrame(records), cols
+
+
 def _norm_name(s):
     """Lower-case and collapse whitespace for case-insensitive comparison."""
     return " ".join(str(s).lower().split())
@@ -1056,6 +1099,36 @@ if uploaded is not None:
             st.dataframe(styled_missing, use_container_width=True)
             st.markdown("**Rows needing attention:**")
             st.dataframe(reg_detail, use_container_width=True, hide_index=True)
+
+    # ---- Validation: no empty Dr/Cr ledger names (Purchase/Sales & PCR) ----
+    if tool_name in REQUIRED_LEDGER_COLUMNS:
+        try:
+            empty_df, checked_cols = find_empty_ledger_rows(
+                uploaded.getvalue(), REQUIRED_LEDGER_COLUMNS[tool_name])
+        except Exception as exc:  # noqa: BLE001
+            empty_df, checked_cols = None, []
+            st.warning(f"Could not check for empty ledger names: {exc}")
+
+        if empty_df is not None:
+            block_conversion = True
+            cols_txt = " / ".join(checked_cols)
+            st.error(
+                f"🚫 **{len(empty_df)}** row(s) have an empty ledger name. "
+                f"**{cols_txt}** must be filled in for every voucher — a blank "
+                "ledger name makes the whole Tally import fail. Fix the rows "
+                "below, then re-upload."
+            )
+            styled_empty = empty_df.style.apply(
+                lambda col: [
+                    "background-color: #ffd6d6"
+                    if (col.name in checked_cols and str(v).strip() == "")
+                    else "" for v in col
+                ],
+                axis=0,
+            )
+            st.dataframe(styled_empty, use_container_width=True, hide_index=True)
+        elif checked_cols:
+            st.success(f"✅ No empty {' / '.join(checked_cols)} values.")
 
     if block_conversion:
         st.info("Conversion is paused until the errors above are resolved.")

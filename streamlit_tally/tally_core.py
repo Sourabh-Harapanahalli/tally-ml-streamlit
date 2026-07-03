@@ -20,6 +20,7 @@ import numpy as np
 import pandas as pd
 from openpyxl import Workbook, load_workbook
 from openpyxl.styles import Alignment, Border, PatternFill, Side
+from openpyxl.utils import get_column_letter
 
 
 # ==========================================================================
@@ -92,6 +93,31 @@ def _style_widths(wb):
             sheet.column_dimensions[column[0].column_letter].width = 15
 
 
+def _force_text_columns(wb, sheet_name, headers, n_rows=5000):
+    """Pre-format the given columns as Text (``@``) on ``sheet_name``.
+
+    Date columns are the reason this exists: Excel auto-converts pasted values
+    to its own locale date format, silently turning a ``dd/mm/yyyy`` paste into
+    ``mm/dd/yyyy`` for ambiguous days (<= 12) while leaving the rest as text —
+    a half-corrupted column no code can reliably un-swap. When the cells are
+    Text *before* data is entered, Excel keeps every pasted value exactly as
+    typed (``01/04/2025``, or ``01/04/2025 10:30`` with time), so the converter
+    can parse it day-first. Both the column and a generous block of cells are
+    formatted so pasted rows land in Text cells too.
+    """
+    ws = wb[sheet_name]
+    header_cells = {c.value: c.column
+                    for c in next(ws.iter_rows(min_row=1, max_row=1))}
+    for header in headers:
+        col = header_cells.get(header)
+        if not col:
+            continue
+        ws.column_dimensions[get_column_letter(col)].number_format = '@'
+        for row in range(1, n_rows + 1):
+            ws.cell(row=row, column=col).number_format = '@'
+    return wb
+
+
 def template_purchase():
     template = pd.DataFrame(columns=(
         'Supplier_Invoice', 'Datetime', 'Vch_Type', 'PartyLedgerName',
@@ -110,6 +136,8 @@ def template_purchase():
     buf.seek(0)
     wb = load_workbook(buf)
     _style_widths(wb)
+    # Keep pasted dd/mm/yyyy dates literal (no Excel mm/dd auto-conversion).
+    _force_text_columns(wb, 'TEMPLATE', ['Datetime'])
     out = BytesIO()
     wb.save(out)
     return out.getvalue()
@@ -126,6 +154,8 @@ def template_pay_con_rec():
     buf.seek(0)
     wb = load_workbook(buf)
     _style_widths(wb)
+    # Keep pasted dd/mm/yyyy dates literal (no Excel mm/dd auto-conversion).
+    _force_text_columns(wb, 'TEMPLATE', ['DATE_TIME'])
     out = BytesIO()
     wb.save(out)
     return out.getvalue()

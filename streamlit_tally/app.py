@@ -539,6 +539,38 @@ def find_dates_out_of_range(file_bytes, date_from, date_to,
     return detail_df, n_unparsed
 
 
+def find_excel_converted_dates(file_bytes, date_col, id_col=None):
+    """Detect date cells Excel stored as real dates instead of literal text.
+
+    When a file is filled using the current template the date column is Text, so
+    ``01/04/2025`` stays the exact string. If cells come back as real datetime
+    values it means Excel auto-converted them on entry — and for ambiguous days
+    (<= 12) it may have swapped day/month (dd/mm -> mm/dd). Those values can no
+    longer be trusted. Returns ``(detail_df, n_total)`` where detail_df samples
+    the affected rows, or ``(None, 0)`` if the column is clean (all text/blank).
+    """
+    import datetime as _dt
+    df = pd.read_excel(io.BytesIO(file_bytes), sheet_name="TEMPLATE")
+    if date_col not in df.columns:
+        return None, 0
+
+    def _is_real_date(v):
+        return isinstance(v, (pd.Timestamp, _dt.datetime, _dt.date)) and not pd.isna(v)
+
+    mask = df[date_col].map(_is_real_date)
+    if not mask.any():
+        return None, 0
+
+    records = []
+    for idx in df.index[mask][:50]:  # sample: enough to show the problem
+        rec = {"Row": int(idx) + 2}  # +2: 1-based + header row
+        if id_col and id_col in df.columns:
+            rec[id_col] = df.at[idx, id_col]
+        rec[date_col] = str(df.at[idx, date_col])
+        records.append(rec)
+    return pd.DataFrame(records), int(mask.sum())
+
+
 def closest_ledger_names(name, tally_names, n=6):
     """Return up to n closest Tally ledger names to `name`, best first.
 
@@ -1145,11 +1177,33 @@ if uploaded is not None:
         if ledger_blocked:
             st.stop()
 
-    # ---- Step 2b: Voucher date range check -----------------------------
     DATE_COLS = {
         "Purchase / Sales": ("Datetime", "Supplier_Invoice"),
         "Payment / Contra / Receipt": ("DATE_TIME", "PartyLedgerName"),
     }
+
+    # ---- Date-format sanity check: warn if Excel auto-converted dates -------
+    if tool_name in DATE_COLS:
+        date_col, id_col = DATE_COLS[tool_name]
+        try:
+            conv_df, n_conv = find_excel_converted_dates(
+                uploaded.getvalue(), date_col, id_col)
+        except Exception:  # noqa: BLE001
+            conv_df, n_conv = None, 0
+        if conv_df is not None:
+            st.warning(
+                f"⚠️ **{n_conv}** {date_col} cell(s) were stored by Excel as "
+                "**real dates**, not text. If you pasted dates as DD/MM/YYYY, "
+                "Excel may have swapped day↔month for days ≤ 12 (e.g. 04/01 "
+                "instead of 01/04). To be safe, **re-download the template** "
+                "(its date column is now Text) and paste your dates again — "
+                "they'll stay exactly as typed. The conversion below reads "
+                "these cells as-is."
+            )
+            with st.expander(f"Show {date_col} cells stored as Excel dates"):
+                st.dataframe(conv_df, use_container_width=True, hide_index=True)
+
+    # ---- Step 2b: Voucher date range check -----------------------------
     if date_enabled and tool_name in DATE_COLS:
         date_col, id_col = DATE_COLS[tool_name]
         st.subheader("Step 2b — Voucher date range check")

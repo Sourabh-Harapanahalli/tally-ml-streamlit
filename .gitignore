@@ -27,3 +27,8 @@ db.sqlite3-journal
 *.swp
 .idea/
 .vscode/
+
+# Secrets — never commit API keys / .env files
+.env
+*.env
+**/.env

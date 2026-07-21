@@ -9,3 +9,12 @@ openpyxl>=3.1
 # Purchase/Sales ledger-name check. Needs the Tally ODBC driver on the host
 # plus a system ODBC manager, and only works on the same machine as Tally.
 pyodbc>=5.1
+
+# Bank/loan statement PDF → Payment/Contra/Receipt tool. Each PDF page is
+# rendered to an image with pypdfium2 and sent to an OpenAI vision model, which
+# formats the vouchers directly. python-dotenv loads OPENAI_API_KEY from a .env
+# file in the app folder.
+openai>=1.50
+google-genai>=1.0
+pypdfium2>=4.30
+python-dotenv>=1.0

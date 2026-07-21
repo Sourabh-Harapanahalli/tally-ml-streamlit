@@ -12,6 +12,7 @@ Run:  streamlit run app.py
 import difflib
 import html
 import io
+import os
 import re
 from datetime import date
 
@@ -20,6 +21,14 @@ import streamlit as st
 from openpyxl import load_workbook
 
 import tally_core
+import bank_pdf
+
+# Load OPENAI_API_KEY (and any other vars) from a .env file if present.
+try:
+    from dotenv import load_dotenv
+    load_dotenv()
+except ImportError:
+    pass
 
 # Must be the first Streamlit command in the script.
 st.set_page_config(page_title="TALLY ML", page_icon="📒", layout="centered")
@@ -183,6 +192,17 @@ def build_example(tool_name):
 # Registration_Type, GST_NO, Opening_Balance, Dr/Cr, Address).
 # --------------------------------------------------------------------------
 MASTER_XML_TOOL = "Master XML → Excel (reverse)"
+BANK_PDF_TOOL = "Bank Statement PDF → Pay/Contra/Receipt"
+
+
+@st.cache_data(show_spinner=False)
+def convert_statement_pdf(pdf_bytes, model):
+    """Run the PDF → PCR conversion, cached on (pdf_bytes, model).
+
+    Caching means a Streamlit rerun — e.g. clicking a download button — returns
+    the previous result instantly instead of re-calling the (paid) LLM.
+    """
+    return bank_pdf.pcr_from_pdf(pdf_bytes, model=model)
 
 # Column order must match the Master — Ledger TEMPLATE sheet.
 LEDGER_COLUMNS = [
@@ -946,7 +966,109 @@ def pcr_ledger_check_ui(file_bytes):
 st.sidebar.title("📒 TALLY ML")
 st.sidebar.caption("Excel → Tally XML converter")
 tool_name = st.sidebar.radio(
-    "Choose a converter", list(TOOLS.keys()) + [MASTER_XML_TOOL, ODBC_TOOL])
+    "Choose a converter",
+    list(TOOLS.keys()) + [BANK_PDF_TOOL, MASTER_XML_TOOL, ODBC_TOOL])
+
+# ==========================================================================
+# Bank / loan statement PDF  ->  Payment/Contra/Receipt template (LLM).
+# ==========================================================================
+if tool_name == BANK_PDF_TOOL:
+    st.title(BANK_PDF_TOOL)
+    st.info(
+        "Upload a **bank or loan statement PDF**. Every page is rendered to an "
+        "image and read by a vision model, which formats each transaction into "
+        "the Payment / Contra / Receipt template — **debits → Payment, credits "
+        "→ Receipt, cash → Contra** — inferring the ledger names from the "
+        "statement."
+    )
+
+    model = st.selectbox("Model (OpenAI)", bank_pdf.MODEL_CHOICES,
+                         index=bank_pdf.MODEL_CHOICES.index(bank_pdf.DEFAULT_MODEL))
+    custom_model = st.text_input(
+        "…or enter a custom model name", value="",
+        placeholder="leave blank to use the selection above").strip()
+    model = custom_model or model
+
+    if bank_pdf.provider_for(model) == "gemini":
+        has_key = bool(os.getenv("GEMINI_API_KEY") or os.getenv("GOOGLE_API_KEY"))
+        key_name = "GEMINI_API_KEY"
+    else:
+        has_key = bool(os.getenv("OPENAI_API_KEY"))
+        key_name = "OPENAI_API_KEY"
+    if not has_key:
+        st.warning(f"`{key_name}` is not set. Add it to a `.env` file in the "
+                   "app folder (or the environment) and reload.")
+
+    pdf_file = st.file_uploader("Upload the statement PDF", type=["pdf"],
+                                key="uploader_bank_pdf")
+
+    if pdf_file is not None:
+        usage = None
+        with st.spinner(f"Reading the statement pages with {model}…"):
+            try:
+                pcr_df, usage = convert_statement_pdf(pdf_file.getvalue(), model)
+            except ImportError as exc:
+                pcr_df = None
+                st.error("A required package is missing. Run "
+                         "`pip install openai google-genai pypdfium2`. "
+                         f"({exc})")
+            except Exception as exc:  # noqa: BLE001
+                pcr_df = None
+                st.error(f"Could not convert the statement: {exc}")
+
+        if pcr_df is not None and pcr_df.empty:
+            st.warning(
+                f"**{model}** read the pages but returned no vouchers — its "
+                "vision is likely too weak for this statement's table. Switch "
+                "to **gpt-5-mini** (or gpt-5) above and try again.")
+        elif pcr_df is not None:
+            counts = pcr_df["Vch_Type"].value_counts().to_dict()
+            st.success(f"Formatted **{len(pcr_df)}** voucher(s) — "
+                       + " · ".join(f"**{k}**: {v}" for k, v in counts.items()))
+            st.dataframe(pcr_df, use_container_width=True, hide_index=True)
+
+            # ---- Token usage & cost --------------------------------------
+            if usage:
+                st.subheader("Token usage & cost")
+                m1, m2, m3, m4 = st.columns(4)
+                m1.metric("Input tokens", f"{usage['input_tokens']:,}")
+                m2.metric("Output tokens", f"{usage['output_tokens']:,}")
+                m3.metric("Total tokens", f"{usage['total_tokens']:,}")
+                if usage.get("cost_usd") is not None:
+                    m4.metric("Est. cost", f"${usage['cost_usd']:.4f}")
+                    st.caption(
+                        f"Model `{usage['model']}` · rates "
+                        f"${usage['input_rate']:.2f}/1M in, "
+                        f"${usage['output_rate']:.2f}/1M out · "
+                        f"input ${usage['input_cost']:.4f} + "
+                        f"output ${usage['output_cost']:.4f}. "
+                        "Rates are list prices configured in `bank_pdf.py`."
+                    )
+                else:
+                    m4.metric("Est. cost", "n/a")
+                    st.caption(f"No pricing configured for `{usage['model']}` in "
+                               "`bank_pdf.py` — showing token counts only.")
+
+            xlsx_bytes = bank_pdf.pcr_to_xlsx(pcr_df)
+            c1, c2 = st.columns(2)
+            c1.download_button(
+                "⬇️ Pay/Contra/Receipt template (.xlsx)",
+                data=xlsx_bytes, file_name="Pay_Con_Rec_from_statement.xlsx",
+                mime=XLSX_MIME)
+            try:
+                result = tally_core.convert_pay_con_rec(io.BytesIO(xlsx_bytes))
+                c2.download_button(
+                    "⬇️ Tally XML", data=tally_core.result_xml_bytes(result),
+                    file_name="Pay_Con_Rec_from_statement.xml",
+                    mime="application/xml")
+            except Exception as exc:  # noqa: BLE001
+                c2.warning(f"Could not build XML: {exc}")
+
+            st.caption("Tip: upload the .xlsx under **Payment / Contra / "
+                       "Receipt** to run the ledger, date and empty-cell checks "
+                       "before importing to Tally.")
+
+    st.stop()
 
 # ==========================================================================
 # Live tool: browse a running Tally instance over ODBC.

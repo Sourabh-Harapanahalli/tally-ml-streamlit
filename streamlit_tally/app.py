@@ -293,6 +293,18 @@ def compare_pick_column(side, upload):
     return description, table[column]
 
 
+def compare_pasted_column(side, text):
+    """Pasted values as a column: (description, Series indexed by line no.)."""
+    series, extra_cells = excel_compare.pasted_series(text)
+    if extra_cells:
+        st.warning(f"**{side}:** {extra_cells} pasted line(s) have more than "
+                   "one tab-separated cell — only the first cell of each "
+                   "line is used.")
+    filled = int(series.map(lambda v: bool(str(v).strip())).sum())
+    st.success(f"{side}: **{filled:,}** pasted value(s)")
+    return f"the values pasted for {side}", series
+
+
 def _tag_text(block, tag):
     """Return the unescaped, trimmed text of the first <tag>…</tag> in block."""
     m = re.search(r"<" + tag + r">(.*?)</" + tag + r">", block, re.S)
@@ -1378,25 +1390,55 @@ if tool_name == GSTR1_JSON_TOOL:
 if tool_name == COMPARE_TOOL:
     st.title(COMPARE_TOOL)
     st.info(
-        "Upload **Excel A** and **Excel B**, then **click one column heading "
-        "in each preview**. The tool lists the values of each column that are "
-        "missing from the other."
+        "Give two lists, **A** and **B** — for each one either upload an "
+        "Excel file and **click one column heading in its preview**, or "
+        "**paste the values** (one per line). The tool lists the values of "
+        "each list that are missing from the other."
     )
 
-    u1, u2 = st.columns(2)
-    upload_a = u1.file_uploader("Upload 1 — Excel A", type=["xlsx", "xlsm"],
-                                accept_multiple_files=False,
-                                key="uploader_compare_a")
-    upload_b = u2.file_uploader("Upload 2 — Excel B", type=["xlsx", "xlsm"],
-                                accept_multiple_files=False,
-                                key="uploader_compare_b")
+    upload_a = upload_b = None
+    pasted_a = pasted_b = ""
+    for side, number, box in zip("AB", "12", st.columns(2)):
+        source = box.radio(
+            f"Source {number} — {side}", ["Upload Excel", "Paste values"],
+            horizontal=True, key=f"cmp_source_{side}")
+        if source == "Upload Excel":
+            upload = box.file_uploader(
+                f"Upload {number} — Excel {side}", type=["xlsx", "xlsm"],
+                accept_multiple_files=False,
+                key=f"uploader_compare_{side.lower()}")
+            text = ""
+        else:
+            upload = None
+            text = box.text_area(
+                f"Paste the values for {side}", height=180,
+                key=f"cmp_paste_{side}",
+                placeholder="One value per line, e.g. a column copied "
+                            "from Excel",
+                help="Every line is one value — do not include a heading. "
+                     "If a line has several tab-separated cells, only the "
+                     "first is used.")
+        if side == "A":
+            upload_a, pasted_a = upload, text
+        else:
+            upload_b, pasted_b = upload, text
 
-    picked_a = compare_pick_column("A", upload_a) if upload_a else None
+    have_a = bool(upload_a or pasted_a.strip())
+    have_b = bool(upload_b or pasted_b.strip())
+
+    def compare_side(side, upload, text):
+        if upload:
+            return compare_pick_column(side, upload)
+        if text.strip():
+            return compare_pasted_column(side, text)
+        return None
+
+    picked_a = compare_side("A", upload_a, pasted_a)
     if upload_a and upload_b:
         st.divider()
-    picked_b = compare_pick_column("B", upload_b) if upload_b else None
+    picked_b = compare_side("B", upload_b, pasted_b)
 
-    if upload_a and upload_b:
+    if have_a and have_b:
         st.divider()
         st.subheader("Result")
         with st.expander("Matching options"):
@@ -1408,8 +1450,8 @@ if tool_name == COMPARE_TOOL:
         if not (picked_a and picked_b):
             waiting = [side for side, p in (("A", picked_a), ("B", picked_b))
                        if not p]
-            st.warning("Select a column in Excel "
-                       + " and Excel ".join(waiting) + " to see the result.")
+            st.warning("Select a column for " + " and ".join(waiting)
+                       + " to see the result.")
         else:
             (label_a, series_a), (label_b, series_b) = picked_a, picked_b
             result = excel_compare.compare(series_a, series_b,
@@ -1424,20 +1466,20 @@ if tool_name == COMPARE_TOOL:
             m4.metric("Missing in total", f"{len(only_a) + len(only_b):,}")
 
             if only_a.empty and only_b.empty:
-                st.success("Nothing is missing — every value of Excel A "
-                           f"({label_a}) is in Excel B ({label_b}), and every "
-                           "value of Excel B is in Excel A.")
+                st.success("Nothing is missing — every value of A "
+                           f"({label_a}) is in B ({label_b}), and every "
+                           "value of B is in A.")
 
             for side, other, frame, mine, theirs in (
                     ("A", "B", only_a, label_a, label_b),
                     ("B", "A", only_b, label_b, label_a)):
                 if frame.empty:
                     if not (only_a.empty and only_b.empty):
-                        st.success(f"**Missing from Excel {other}: none.** "
+                        st.success(f"**Missing from {other}: none.** "
                                    f"Every value of {mine} is also in "
                                    f"{theirs}.")
                     continue
-                st.error(f"**Missing from Excel {other}: {len(frame):,} "
+                st.error(f"**Missing from {other}: {len(frame):,} "
                          f"value(s).** These are in {mine} but not in "
                          f"{theirs}.")
                 st.dataframe(frame.astype({"Value": str}),
@@ -1449,8 +1491,9 @@ if tool_name == COMPARE_TOOL:
                 file_name="Missing_values_A_vs_B.xlsx", mime=XLSX_MIME,
                 type="primary")
             st.caption("Blank cells are ignored and repeated values are "
-                       "counted once. “Excel row(s)” is where each value sits "
-                       "in its own file.")
+                       "counted once. “Row(s)” is where each value sits in "
+                       "its own list: the Excel row for an uploaded file, the "
+                       "line number for pasted values.")
 
     st.stop()
 

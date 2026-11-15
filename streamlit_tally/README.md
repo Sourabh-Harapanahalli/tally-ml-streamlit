@@ -54,8 +54,8 @@ There are also a few extra tools:
 - **GSTR-1 JSON → Excel** — upload a GSTR-1 JSON from the GST portal and export
   B2B, CDNR, B2CS, NIL, HSN or ALL to Excel (detail rows plus rate-wise
   totals). Each JSON becomes its own workbook; missing sections are skipped. Logic lives in `gstr1_json.py`.
-- **Find Missing Values (Excel A vs B)** — upload two workbooks, click one column
-  in each preview, and see which values of each column are missing from the
+- **Find Missing Values (Excel A vs B)** — upload two workbooks and click one
+  column in each preview (or paste the values for either side), and see which values of each column are missing from the
   other. Logic lives in `excel_compare.py`.
 - **Tally ODBC — Live Data** — query a running Tally instance over its ODBC
   server (needs the Tally ODBC driver; install `pyodbc` and run next to Tally).

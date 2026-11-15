@@ -105,6 +105,22 @@ def to_table(rows, header_row):
     return df[keep]
 
 
+def pasted_series(text):
+    """Pasted text as a column: one value per line, indexed by line number.
+
+    A line copied from several Excel columns arrives tab-separated; only its
+    first cell is kept. Returns (Series, number of lines that had extra cells).
+    """
+    values, extra = [], 0
+    for line in text.replace("\r\n", "\n").replace("\r", "\n").split("\n"):
+        cells = line.split("\t")
+        if any(c.strip() for c in cells[1:]):
+            extra += 1
+        values.append(cells[0])
+    series = pd.Series(values, index=range(1, len(values) + 1), dtype=object)
+    return series, extra
+
+
 def normalise(value, ignore_case=True, ignore_spaces=True):
     """Comparable text form of a cell, or None for a blank cell. 123, 123.0
     and "123" compare equal, as do a date cell and the same date as text in
@@ -154,12 +170,12 @@ def _missing_frame(mine, other):
         if len(where) > MAX_ROWS_LISTED:
             listed += f" … (+{len(where) - MAX_ROWS_LISTED} more)"
         rows.append({"Value": value, "Occurrences": len(where),
-                     "Excel row(s)": listed})
-    return pd.DataFrame(rows, columns=["Value", "Occurrences", "Excel row(s)"])
+                     "Row(s)": listed})
+    return pd.DataFrame(rows, columns=["Value", "Occurrences", "Row(s)"])
 
 
 def compare(series_a, series_b, ignore_case=True, ignore_spaces=True):
-    """Compare two columns (Series indexed by Excel row number).
+    """Compare two columns (Series indexed by Excel row / pasted line number).
 
     Returns a dict with the two "missing" tables and the counts behind them.
     Blank cells are ignored; repeated values are counted once.

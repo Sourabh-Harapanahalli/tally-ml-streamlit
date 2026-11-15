@@ -23,6 +23,7 @@ from openpyxl import load_workbook
 
 import tally_core
 import bank_pdf
+import excel_compare
 import excel_merge
 import gstr1_json
 
@@ -198,6 +199,7 @@ MASTER_XML_TOOL = "Master XML → Excel (reverse)"
 BANK_PDF_TOOL = "Bank Statement PDF → Pay/Contra/Receipt"
 CONSOLIDATE_TOOL = "Consolidate Excel Files"
 GSTR1_JSON_TOOL = "GSTR-1 JSON → Excel"
+COMPARE_TOOL = "Find Missing Values (Excel A vs B)"
 
 
 @st.cache_data(show_spinner=False)
@@ -223,6 +225,72 @@ def consolidate_excel(files, add_source, drop_duplicates, keep_identical_once,
     return excel_merge.consolidate_workbooks(
         list(files), add_source=add_source, drop_duplicates=drop_duplicates,
         keep_identical_once=keep_identical_once, header_rows=header_rows)
+
+
+@st.cache_data(show_spinner=False)
+def compare_load_sheets(file_bytes):
+    """Every non-empty sheet of a workbook as raw rows (cached)."""
+    return excel_compare.load_sheets(file_bytes)
+
+
+def compare_pick_column(side, upload):
+    """Preview one workbook and let the user click a single column.
+
+    Returns (description, Series) for the chosen column, or None while no
+    column is selected. Only one sheet is shown at a time and the table
+    allows a single column, so each workbook can have just one selection.
+    """
+    st.subheader(f"Excel {side} — {upload.name}")
+    try:
+        sheets = compare_load_sheets(upload.getvalue())
+    except Exception as exc:  # noqa: BLE001
+        st.error(f"Could not read **{upload.name}**: {exc}")
+        return None
+    if not sheets:
+        st.warning("This workbook has no data.")
+        return None
+
+    names = list(sheets)
+    c1, c2 = st.columns([3, 1])
+    if len(names) <= 6:
+        sheet = c1.radio("Sheet", names, horizontal=True,
+                         key=f"cmp_sheet_{side}")
+    else:
+        sheet = c1.selectbox("Sheet", names, key=f"cmp_sheet_{side}")
+    rows = sheets[sheet]
+    header_row = int(c2.number_input(
+        "Header row", min_value=1, max_value=len(rows),
+        value=min(excel_compare.guess_header_row(rows), len(rows)), step=1,
+        key=f"cmp_header_{side}_{sheet}",
+        help="The Excel row that holds the column headings. Change it if "
+             "the headings below look wrong."))
+    table = excel_compare.to_table(rows, header_row)
+    if table.empty:
+        st.warning("There are no rows below the header row.")
+        return None
+
+    preview = table.head(500)
+    preview = preview.where(preview.notna(), "").astype(str)
+    # The key carries the file, sheet and header row, so changing any of them
+    # starts a fresh table with nothing selected.
+    event = st.dataframe(
+        preview, use_container_width=True, height=300,
+        on_select="rerun", selection_mode="single-column",
+        key=f"cmp_table_{side}_{upload.name}_{upload.size}_{sheet}_{header_row}")
+    if len(table) > 500:
+        st.caption(f"Preview shows the first 500 of {len(table):,} rows — "
+                   "the comparison uses all of them.")
+
+    picked = [c for c in event.selection.columns if c in table.columns]
+    if not picked:
+        st.info(f"👆 Click a column heading above to select the column of "
+                f"Excel {side} to compare.")
+        return None
+    column = picked[0]
+    st.success(f"Excel {side} column selected: **{column}** (sheet "
+               f"**{sheet}**)")
+    description = f"column '{column}' of sheet '{sheet}' in {upload.name}"
+    return description, table[column]
 
 
 def _tag_text(block, tag):
@@ -982,6 +1050,7 @@ st.sidebar.caption("Excel → Tally XML converter")
 tool_name = st.sidebar.radio(
     "Choose a converter",
     list(TOOLS.keys()) + [BANK_PDF_TOOL, MASTER_XML_TOOL, CONSOLIDATE_TOOL, GSTR1_JSON_TOOL,
+                               COMPARE_TOOL,
                                ODBC_TOOL])
 
 # ==========================================================================
@@ -1300,6 +1369,88 @@ if tool_name == GSTR1_JSON_TOOL:
                     if others:
                         st.caption("Also in the file but not exported: "
                                    + ", ".join(others) + ".")
+
+    st.stop()
+
+# ==========================================================================
+# Find missing values: one column of Excel A against one column of Excel B.
+# ==========================================================================
+if tool_name == COMPARE_TOOL:
+    st.title(COMPARE_TOOL)
+    st.info(
+        "Upload **Excel A** and **Excel B**, then **click one column heading "
+        "in each preview**. The tool lists the values of each column that are "
+        "missing from the other."
+    )
+
+    u1, u2 = st.columns(2)
+    upload_a = u1.file_uploader("Upload 1 — Excel A", type=["xlsx", "xlsm"],
+                                accept_multiple_files=False,
+                                key="uploader_compare_a")
+    upload_b = u2.file_uploader("Upload 2 — Excel B", type=["xlsx", "xlsm"],
+                                accept_multiple_files=False,
+                                key="uploader_compare_b")
+
+    picked_a = compare_pick_column("A", upload_a) if upload_a else None
+    if upload_a and upload_b:
+        st.divider()
+    picked_b = compare_pick_column("B", upload_b) if upload_b else None
+
+    if upload_a and upload_b:
+        st.divider()
+        st.subheader("Result")
+        with st.expander("Matching options"):
+            cmp_case = st.checkbox("Ignore upper / lower case", value=True,
+                                   key="cmp_ignore_case")
+            cmp_space = st.checkbox("Ignore extra spaces", value=True,
+                                    key="cmp_ignore_spaces")
+
+        if not (picked_a and picked_b):
+            waiting = [side for side, p in (("A", picked_a), ("B", picked_b))
+                       if not p]
+            st.warning("Select a column in Excel "
+                       + " and Excel ".join(waiting) + " to see the result.")
+        else:
+            (label_a, series_a), (label_b, series_b) = picked_a, picked_b
+            result = excel_compare.compare(series_a, series_b,
+                                           ignore_case=cmp_case,
+                                           ignore_spaces=cmp_space)
+            only_a, only_b = result["only_a"], result["only_b"]
+
+            m1, m2, m3, m4 = st.columns(4)
+            m1.metric("Distinct in A", f"{result['unique_a']:,}")
+            m2.metric("Distinct in B", f"{result['unique_b']:,}")
+            m3.metric("In both", f"{result['common']:,}")
+            m4.metric("Missing in total", f"{len(only_a) + len(only_b):,}")
+
+            if only_a.empty and only_b.empty:
+                st.success("Nothing is missing — every value of Excel A "
+                           f"({label_a}) is in Excel B ({label_b}), and every "
+                           "value of Excel B is in Excel A.")
+
+            for side, other, frame, mine, theirs in (
+                    ("A", "B", only_a, label_a, label_b),
+                    ("B", "A", only_b, label_b, label_a)):
+                if frame.empty:
+                    if not (only_a.empty and only_b.empty):
+                        st.success(f"**Missing from Excel {other}: none.** "
+                                   f"Every value of {mine} is also in "
+                                   f"{theirs}.")
+                    continue
+                st.error(f"**Missing from Excel {other}: {len(frame):,} "
+                         f"value(s).** These are in {mine} but not in "
+                         f"{theirs}.")
+                st.dataframe(frame.astype({"Value": str}),
+                             use_container_width=True, hide_index=True)
+
+            st.download_button(
+                "⬇️ Download the result (.xlsx)",
+                data=excel_compare.result_xlsx(result, label_a, label_b),
+                file_name="Missing_values_A_vs_B.xlsx", mime=XLSX_MIME,
+                type="primary")
+            st.caption("Blank cells are ignored and repeated values are "
+                       "counted once. “Excel row(s)” is where each value sits "
+                       "in its own file.")
 
     st.stop()
 

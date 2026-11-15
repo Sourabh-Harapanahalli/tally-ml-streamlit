@@ -43,10 +43,14 @@ For **Purchase / Sales**, an optional step verifies the `PartyLedgerName` and
 mismatch is flagged with the closest matching ledger and a one-click **Fix**
 button that corrects the file before conversion.
 
-There are also two extra tools:
+There are also a few extra tools:
 
 - **Master XML → Excel (reverse)** — turn a Tally "All Masters" XML export back
   into the Master — Ledger Excel format.
+- **Consolidate Excel Files** — upload several workbooks; sheets with the same
+  name are merged into one sheet. The header — single- or multi-row, detected
+  as the top rows common to every file — is kept once and only the data rows
+  of the other files are stacked below. Logic lives in `excel_merge.py`.
 - **Tally ODBC — Live Data** — query a running Tally instance over its ODBC
   server (needs the Tally ODBC driver; install `pyodbc` and run next to Tally).
 

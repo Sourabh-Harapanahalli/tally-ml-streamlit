@@ -22,6 +22,7 @@ from openpyxl import load_workbook
 
 import tally_core
 import bank_pdf
+import excel_merge
 
 # Load OPENAI_API_KEY (and any other vars) from a .env file if present.
 try:
@@ -193,6 +194,7 @@ def build_example(tool_name):
 # --------------------------------------------------------------------------
 MASTER_XML_TOOL = "Master XML → Excel (reverse)"
 BANK_PDF_TOOL = "Bank Statement PDF → Pay/Contra/Receipt"
+CONSOLIDATE_TOOL = "Consolidate Excel Files"
 
 
 @st.cache_data(show_spinner=False)
@@ -209,6 +211,15 @@ LEDGER_COLUMNS = [
     "Ledger_Name", "Alias", "Group_Name", "Country", "State_Name", "Pincode",
     "Registration_Type", "GST_NO", "Opening_Balance", "Dr/Cr", "Address",
 ]
+
+
+@st.cache_data(show_spinner=False)
+def consolidate_excel(files, add_source, drop_duplicates, keep_identical_once,
+                      header_rows):
+    """Merge same-named sheets across the uploaded workbooks (cached)."""
+    return excel_merge.consolidate_workbooks(
+        list(files), add_source=add_source, drop_duplicates=drop_duplicates,
+        keep_identical_once=keep_identical_once, header_rows=header_rows)
 
 
 def _tag_text(block, tag):
@@ -967,7 +978,7 @@ st.sidebar.title("📒 TALLY ML")
 st.sidebar.caption("Excel → Tally XML converter")
 tool_name = st.sidebar.radio(
     "Choose a converter",
-    list(TOOLS.keys()) + [BANK_PDF_TOOL, MASTER_XML_TOOL, ODBC_TOOL])
+    list(TOOLS.keys()) + [BANK_PDF_TOOL, MASTER_XML_TOOL, CONSOLIDATE_TOOL, ODBC_TOOL])
 
 # ==========================================================================
 # Bank / loan statement PDF  ->  Payment/Contra/Receipt template (LLM).
@@ -1067,6 +1078,118 @@ if tool_name == BANK_PDF_TOOL:
             st.caption("Tip: upload the .xlsx under **Payment / Contra / "
                        "Receipt** to run the ledger, date and empty-cell checks "
                        "before importing to Tally.")
+
+    st.stop()
+
+# ==========================================================================
+# Consolidate Excel files: same-named sheets are merged into one.
+# ==========================================================================
+if tool_name == CONSOLIDATE_TOOL:
+    st.title(CONSOLIDATE_TOOL)
+    st.info(
+        "Upload **two or more Excel files**. Sheets with the **same name** are "
+        "merged automatically into one sheet — the header is kept **once** "
+        "(from the first file) and only the data rows of the other files are "
+        "stacked below it, in upload order. Headers that span **several rows** "
+        "(title lines, grouped / merged headings) are detected automatically. "
+        "Sheets found in only one file are carried over as they are."
+    )
+
+    merge_files = st.file_uploader(
+        "Upload the Excel files to consolidate",
+        type=["xlsx", "xlsm"],
+        accept_multiple_files=True,
+        key="uploader_consolidate",
+    )
+
+    with st.expander("Options"):
+        manual_header = st.checkbox(
+            "Set the number of header rows myself",
+            value=False, key="consolidate_manual_header",
+            help="By default the header is the block of top rows that is "
+                 "identical in every file. Tick this if the detected count in "
+                 "the summary is wrong.")
+        header_rows = None
+        if manual_header:
+            header_rows = int(st.number_input(
+                "Header rows at the top of every sheet", min_value=0,
+                max_value=100, value=1, step=1, key="consolidate_header_rows"))
+        keep_once = st.checkbox(
+            "Keep a single copy of sheets that are identical in every file",
+            value=True, key="consolidate_keep_once",
+            help="Stops reference / mapping sheets such as "
+                 "MASTER_LEDGER_NAME_LINK from being repeated once per file.")
+        drop_dupes = st.checkbox(
+            "Remove duplicate rows within each merged sheet",
+            value=False, key="consolidate_drop_dupes")
+        add_source = st.checkbox(
+            "Add a Source_File column showing which file each row came from",
+            value=False, key="consolidate_add_source",
+            help="Leave this off if the result will be uploaded to one of the "
+                 "Tally converters.")
+        out_name = st.text_input("Output file name", value="Consolidated.xlsx",
+                                 key="consolidate_out_name").strip()
+    out_name = out_name or "Consolidated.xlsx"
+    if not out_name.lower().endswith(".xlsx"):
+        out_name += ".xlsx"
+
+    if merge_files:
+        if len(merge_files) < 2:
+            st.caption("Only one file uploaded — add more to merge their sheets.")
+        with st.spinner("Consolidating…"):
+            merged_bytes, merge_summary, merge_errors = consolidate_excel(
+                tuple((f.name, f.getvalue()) for f in merge_files),
+                add_source, drop_dupes, keep_once, header_rows)
+
+        for fname, msg in merge_errors:
+            st.error(f"Could not read **{fname}**: {msg}")
+
+        if merged_bytes is None:
+            st.error("No sheets could be read from the uploaded file(s).")
+        else:
+            n_merged = sum(1 for s in merge_summary if s["files"] > 1)
+            st.success(
+                f"Consolidated **{len(merge_files) - len(merge_errors)}** "
+                f"file(s) into **{len(merge_summary)}** sheet(s) — "
+                f"**{n_merged}** merged from more than one file.")
+
+            st.dataframe(
+                pd.DataFrame([{
+                    "Sheet": s["sheet"],
+                    "Files": s["files"],
+                    "Header rows": ("—" if s["header_rows"] is None
+                                    else str(s["header_rows"])),
+                    "Data rows": s["rows"],
+                    "Rows per file": " + ".join(str(n) for _, n in s["sources"]),
+                    "Notes": "; ".join(s["notes"]),
+                } for s in merge_summary]),
+                use_container_width=True, hide_index=True)
+
+            for s in merge_summary:
+                for note in s["notes"]:
+                    if note.startswith("Columns not in every file"):
+                        st.warning(f"**{s['sheet']}** — {note}. Those cells "
+                                   "are left blank for the files without them.")
+
+            st.download_button(
+                f"⬇️ Download {out_name}", data=merged_bytes,
+                file_name=out_name, mime=XLSX_MIME, type="primary")
+
+            st.subheader("Preview")
+            preview_sheet = st.selectbox(
+                "Sheet", [s["sheet"] for s in merge_summary],
+                key="consolidate_preview_sheet")
+            preview_df = pd.read_excel(io.BytesIO(merged_bytes),
+                                       sheet_name=preview_sheet, dtype=object,
+                                       header=None)
+            preview_df.columns = [str(i + 1) for i in range(preview_df.shape[1])]
+            st.dataframe(preview_df.head(500).fillna("").astype(str),
+                         use_container_width=True)
+            if len(preview_df) > 500:
+                st.caption(f"Showing the first 500 of {len(preview_df):,} rows.")
+
+            st.caption("Formulas are saved as their calculated values. "
+                       "Empty sheets are skipped.")
 
     st.stop()
 

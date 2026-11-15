@@ -73,7 +73,8 @@ def guess_header_row(rows):
 
 def to_table(rows, header_row):
     """DataFrame of the rows below `header_row` (1-based), with unique text
-    column labels. Unnamed columns are labelled by their Excel letter. The
+    column labels. With header_row=0 the sheet has no header: every row is
+    data and the columns are labelled by Excel letter. Unnamed columns are labelled by their Excel letter. The
     DataFrame index is the Excel row number of each row."""
     width = max(len(r) for r in rows)
     header = rows[header_row - 1] if 0 < header_row <= len(rows) else ()

@@ -258,12 +258,20 @@ def compare_pick_column(side, upload):
     else:
         sheet = c1.selectbox("Sheet", names, key=f"cmp_sheet_{side}")
     rows = sheets[sheet]
+    has_header = st.checkbox(
+        "This sheet has a header — exclude it from the values",
+        value=True, key=f"cmp_has_header_{side}_{sheet}",
+        help="Untick if the sheet has no headings, or if the heading row "
+             "should be compared like any other row. Columns are then "
+             "named by their Excel letter and every row counts as a value.")
     header_row = int(c2.number_input(
         "Header row", min_value=1, max_value=len(rows),
         value=min(excel_compare.guess_header_row(rows), len(rows)), step=1,
-        key=f"cmp_header_{side}_{sheet}",
+        key=f"cmp_header_{side}_{sheet}", disabled=not has_header,
         help="The Excel row that holds the column headings. Change it if "
-             "the headings below look wrong."))
+             "the headings below look wrong. Rows above it are ignored."))
+    if not has_header:
+        header_row = 0                        # every row is data
     table = excel_compare.to_table(rows, header_row)
     if table.empty:
         st.warning("There are no rows below the header row.")

@@ -51,6 +51,9 @@ There are also a few extra tools:
   name are merged into one sheet. The header — single- or multi-row, detected
   as the top rows common to every file — is kept once and only the data rows
   of the other files are stacked below. Logic lives in `excel_merge.py`.
+- **GSTR-1 JSON → Excel** — upload a GSTR-1 JSON from the GST portal and export
+  B2B, CDNR, B2CS, NIL, HSN or ALL to Excel (detail rows plus rate-wise
+  totals). Each JSON becomes its own workbook; missing sections are skipped. Logic lives in `gstr1_json.py`.
 - **Tally ODBC — Live Data** — query a running Tally instance over its ODBC
   server (needs the Tally ODBC driver; install `pyodbc` and run next to Tally).
 

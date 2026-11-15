@@ -14,6 +14,7 @@ import html
 import io
 import os
 import re
+import zipfile
 from datetime import date
 
 import pandas as pd
@@ -23,6 +24,7 @@ from openpyxl import load_workbook
 import tally_core
 import bank_pdf
 import excel_merge
+import gstr1_json
 
 # Load OPENAI_API_KEY (and any other vars) from a .env file if present.
 try:
@@ -195,6 +197,7 @@ def build_example(tool_name):
 MASTER_XML_TOOL = "Master XML → Excel (reverse)"
 BANK_PDF_TOOL = "Bank Statement PDF → Pay/Contra/Receipt"
 CONSOLIDATE_TOOL = "Consolidate Excel Files"
+GSTR1_JSON_TOOL = "GSTR-1 JSON → Excel"
 
 
 @st.cache_data(show_spinner=False)
@@ -978,7 +981,8 @@ st.sidebar.title("📒 TALLY ML")
 st.sidebar.caption("Excel → Tally XML converter")
 tool_name = st.sidebar.radio(
     "Choose a converter",
-    list(TOOLS.keys()) + [BANK_PDF_TOOL, MASTER_XML_TOOL, CONSOLIDATE_TOOL, ODBC_TOOL])
+    list(TOOLS.keys()) + [BANK_PDF_TOOL, MASTER_XML_TOOL, CONSOLIDATE_TOOL, GSTR1_JSON_TOOL,
+                               ODBC_TOOL])
 
 # ==========================================================================
 # Bank / loan statement PDF  ->  Payment/Contra/Receipt template (LLM).
@@ -1190,6 +1194,112 @@ if tool_name == CONSOLIDATE_TOOL:
 
             st.caption("Formulas are saved as their calculated values. "
                        "Empty sheets are skipped.")
+
+    st.stop()
+
+# ==========================================================================
+# GSTR-1 JSON  ->  Excel (B2B / CDNR / B2CS / NIL / HSN / ALL).
+# ==========================================================================
+if tool_name == GSTR1_JSON_TOOL:
+    st.title(GSTR1_JSON_TOOL)
+    st.info(
+        "Upload one or more **GSTR-1 JSON** files downloaded from the GST "
+        "portal, then choose what to export: **B2B, CDNR, B2CS, NIL, HSN** or "
+        "**ALL**. Every JSON becomes **its own workbook** — files are never "
+        "combined. Sections a file does not contain are skipped."
+    )
+
+    json_files = st.file_uploader(
+        "Upload the GSTR-1 JSON file(s)",
+        type=["json", "zip"],
+        accept_multiple_files=True,
+        key="uploader_gstr1_json",
+    )
+
+    if json_files:
+        gstr_returns = []                     # (json name, return dict)
+        for f in json_files:
+            try:
+                gstr_returns.extend(
+                    gstr1_json.load_returns(f.name, f.getvalue()))
+            except Exception as exc:  # noqa: BLE001
+                st.error(f"Could not read **{f.name}**: {exc}")
+
+        if gstr_returns:
+            choice = st.radio(
+                "What do you want to export?",
+                gstr1_json.SECTIONS + [gstr1_json.ALL],
+                index=len(gstr1_json.SECTIONS), horizontal=True,
+                key="gstr1_json_choice")
+
+            # One workbook per JSON.
+            workbooks, used_names = [], set()
+            for json_name, ret in gstr_returns:
+                sheets, missing = gstr1_json.build_sheets([ret], choice)
+                out_file = None
+                if sheets:
+                    stem = os.path.splitext(json_name)[0]
+                    out_file, n = f"{stem}_{choice.lower()}.xlsx", 2
+                    while out_file in used_names:
+                        out_file = f"{stem}_{choice.lower()}_{n}.xlsx"
+                        n += 1
+                    used_names.add(out_file)
+                workbooks.append({
+                    "json": json_name, "ret": ret, "sheets": sheets,
+                    "missing": missing, "file": out_file,
+                    "data": gstr1_json.sheets_to_xlsx(sheets) if sheets else None,
+                })
+
+            made = [w for w in workbooks if w["data"]]
+            if not made:
+                st.warning(f"None of the uploaded files contains **{choice}** "
+                           "data.")
+            else:
+                st.success(f"Created **{len(made)}** workbook(s) from "
+                           f"**{len(workbooks)}** JSON file(s).")
+            if len(made) > 1:
+                zip_buf = io.BytesIO()
+                with zipfile.ZipFile(zip_buf, "w", zipfile.ZIP_DEFLATED) as zf:
+                    for w in made:
+                        zf.writestr(w["file"], w["data"])
+                st.download_button(
+                    f"⬇️ Download all {len(made)} workbooks (.zip)",
+                    data=zip_buf.getvalue(),
+                    file_name=f"GSTR1_{choice.lower()}_workbooks.zip",
+                    mime="application/zip", type="primary",
+                    key="gstr1_json_zip")
+
+            for i, w in enumerate(workbooks):
+                ret = w["ret"]
+                with st.expander(f"📄 {w['json']}", expanded=len(workbooks) == 1):
+                    present = gstr1_json.available_sections([ret])
+                    st.caption(
+                        f"GSTIN: **{ret.get('gstin') or '—'}** · Period: "
+                        f"**{ret.get('fp') or '—'}** · Sections found: "
+                        f"**{', '.join(present) or 'none'}**")
+                    if w["missing"]:
+                        msg = ("Not in this file, so skipped: "
+                               f"**{', '.join(w['missing'])}**.")
+                        (st.info if w["sheets"] else st.warning)(msg)
+                    if w["data"]:
+                        st.download_button(
+                            f"⬇️ Download {w['file']}", data=w["data"],
+                            file_name=w["file"], mime=XLSX_MIME,
+                            type="primary" if len(made) == 1 else "secondary",
+                            key=f"gstr1_json_dl_{i}")
+                        for tab, (sheet_name, sheet_df) in zip(
+                                st.tabs(list(w["sheets"])), w["sheets"].items()):
+                            with tab:
+                                st.caption(f"{len(sheet_df):,} row(s)")
+                                st.dataframe(
+                                    sheet_df.head(1000).astype(str),
+                                    use_container_width=True, hide_index=True)
+                                if len(sheet_df) > 1000:
+                                    st.caption("Showing the first 1,000 rows.")
+                    others = gstr1_json.other_sections([ret])
+                    if others:
+                        st.caption("Also in the file but not exported: "
+                                   + ", ".join(others) + ".")
 
     st.stop()
 

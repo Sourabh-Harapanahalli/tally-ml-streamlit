@@ -1531,7 +1531,7 @@ class Master_Ledger:
 
 
             def replace_amp(text):
-                return text.replace('&', '&amp;')
+                return str(text).replace('&', '&amp;')
             
             data['Ledger_Name'] = data['Ledger_Name'].apply(replace_amp)
             data['Address'] = data['Address'].apply(replace_amp) 
@@ -1774,7 +1774,7 @@ class Master_Duties:
 
 
             def replace_amp(text):
-                return text.replace('&', '&amp;')
+                return str(text).replace('&', '&amp;')
             
             data['Ledger_Name'] = data['Ledger_Name'].apply(replace_amp)
             data['Group_Name'] = data['Group_Name'].apply(replace_amp)            
@@ -1997,7 +1997,7 @@ class Master_PS:
 
 
             def replace_amp(text):
-                return text.replace('&', '&amp;')
+                return str(text).replace('&', '&amp;')
             
             data['Ledger_Name'] = data['Ledger_Name'].apply(replace_amp)
             data['Group_Name'] = data['Group_Name'].apply(replace_amp) 

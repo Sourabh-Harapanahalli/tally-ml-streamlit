@@ -1162,12 +1162,23 @@ def apply_row_ledger_names(file_bytes, renames, drop_rows=()):
     return out.getvalue()
 
 
-def ml_gst_check_ui(file_bytes, key_prefix="ml"):
+def ml_gst_check_ui(file_bytes, key_prefix="ml", drop_rows=()):
     """Step 2a for Master — Ledger: flag GSTINs already in Tally under another
     ledger name, with Fix (use the Tally name) or Ignore (drop the row) per row.
 
+    ``drop_rows`` are row indexes already marked for removal (Step 2 duplicate
+    resolver); they are skipped here and removed together with ignored rows,
+    so row numbers shown in every step match the uploaded file.
     Returns ``(convert_bytes, blocked)`` like :func:`ledger_check_ui`.
     """
+    drop_rows = {int(r) for r in drop_rows}
+
+    def finish(renames=None, ignored=()):
+        rows = drop_rows | set(ignored)
+        if not renames and not rows:
+            return file_bytes
+        return apply_row_ledger_names(file_bytes, renames or {}, rows)
+
     gst_key = f"{key_prefix}_tally_gst"
     fix_key = f"{key_prefix}_corrections"  # {row_index: Tally ledger name}
     st.subheader("Step 2a — Check GST numbers against Tally")
@@ -1207,20 +1218,21 @@ def ml_gst_check_ui(file_bytes, key_prefix="ml"):
                 key=f"{key_prefix}_chk_skip")
             if skip:
                 st.caption("⚠️ GST numbers will NOT be checked against Tally.")
-                return file_bytes, False
+                return finish(), False
             st.info("⏸️ Conversion is paused — fetch from Tally above to check, "
                     "or tick “Skip Tally check”.")
-            return file_bytes, True
+            return finish(), True
 
         fixes = st.session_state.setdefault(fix_key, {})
-        conflicts = find_gst_name_conflicts(file_bytes, by_gst)
+        conflicts = [c for c in find_gst_name_conflicts(file_bytes, by_gst)
+                     if c["row_index"] not in drop_rows]
         st.caption(f"Loaded **{sum(map(len, by_gst.values()))}** Tally ledger(s) "
                    f"with a GST number · **{len(by_gst)}** distinct GSTIN(s).")
 
         if not conflicts:
             st.success("✅ No GST number in your file is already in Tally under "
                        "a different ledger name.")
-            return file_bytes, False
+            return finish(), False
 
         def status(c):
             if c["row_index"] in fixes:
@@ -1294,8 +1306,7 @@ def ml_gst_check_ui(file_bytes, key_prefix="ml"):
         ignored = [c["row_index"] for c in conflicts
                    if c["row_index"] not in fixes and st.session_state.get(
                        f"{key_prefix}_chk_ignore_{c['row_index']}")]
-        convert_bytes = (apply_row_ledger_names(file_bytes, fixes, ignored)
-                         if fixes or ignored else file_bytes)
+        convert_bytes = finish(fixes, ignored)
         remaining = [c for c in conflicts if c["row_index"] not in fixes
                      and c["row_index"] not in ignored]
         if remaining:
@@ -1367,7 +1378,7 @@ def uploader_nonce(state_key):
 # Date-range settings and the Tally connection/ledger list are kept.
 _RESTART_STATE = ("_datecorr", "_date_all", "_dp_", "_corrections",
                   "_chk_skip", "_chk_search_", "_chk_sugg_", "_chk_fix_",
-                  "_chk_convert_anyway", "_chk_ignore_")
+                  "_chk_convert_anyway", "_chk_ignore_", "_dedupe")
 
 
 def restart_tool(state_key, check_prefix=None):
@@ -2165,6 +2176,7 @@ if uploaded is not None:
             st.stop()
 
     # ---- Validation (Master — Ledger) ----------------------------------
+    drop_rows = []  # row indexes removed before converting (duplicate resolver)
     if tool_name == "Master — Ledger":
         try:
             val_df, dup_mask, dup_values = find_duplicate_gst(uploaded.getvalue())
@@ -2196,6 +2208,19 @@ if uploaded is not None:
             # are easy to tell apart.
             group_no = (dup_rows["_gst"] != dup_rows["_gst"].shift()).cumsum()
             shades = ["#ffd6d6" if g % 2 else "#ffb3b3" for g in group_no]
+            # Resolver: keep the first row (file order) of each GST number and
+            # remove the rest before converting. Tied to this exact file.
+            first_rows = set(dup_rows.drop_duplicates("_gst")["Row"])
+            dedupe_drop = sorted(int(r) - 2 for r in dup_rows["Row"]
+                                 if r not in first_rows)
+            file_sig = file_signature(uploaded.getvalue())
+            resolved = st.session_state.get("ml_dedupe") == file_sig
+            if resolved:
+                drop_rows = dedupe_drop
+                dup_rows.insert(1, "Action", ["✅ Keep" if r in first_rows
+                                              else "🗑️ Remove"
+                                              for r in dup_rows["Row"]])
+
             dup_rows = dup_rows.drop(columns="_gst").reset_index(drop=True)
             styled = dup_rows.style.apply(
                 lambda col: [f"background-color: {s}" for s in shades]
@@ -2203,10 +2228,29 @@ if uploaded is not None:
                 axis=0,
             )
             st.dataframe(styled, use_container_width=True, hide_index=True)
+
+            if resolved:
+                st.success(
+                    f"✅ Duplicates resolved — the first row of each GST number "
+                    f"is kept; **{len(dedupe_drop)}** row(s) ("
+                    + ", ".join(str(r + 2) for r in dedupe_drop)
+                    + ") will be removed before converting.")
+                if st.button("↩️ Undo resolve", key="ml_dedupe_undo"):
+                    st.session_state.pop("ml_dedupe", None)
+                    st.rerun()
+            elif st.button(
+                    f"🧹 Resolve duplicates — keep the first row of each GST "
+                    f"number, remove the other {len(dedupe_drop)}",
+                    key="ml_dedupe_btn", type="primary"):
+                st.session_state["ml_dedupe"] = file_sig
+                st.rerun()
         elif val_df is not None:
             st.success("✅ No duplicate GST numbers found.")
 
         # (b) Regular ledgers must have GST_NO, Country and State_Name — blocks.
+        # Rows the duplicate resolver removes are not checked.
+        if val_df is not None and drop_rows:
+            val_df = val_df.drop(index=drop_rows)
         reg_mask, reg_detail = find_missing_regular_fields(val_df)
         if reg_detail is not None:
             block_conversion = True
@@ -2275,7 +2319,8 @@ if uploaded is not None:
         if ledger_blocked:
             st.stop()
     elif tool_name == "Master — Ledger":
-        convert_bytes, gst_blocked = ml_gst_check_ui(uploaded.getvalue())
+        convert_bytes, gst_blocked = ml_gst_check_ui(
+            uploaded.getvalue(), drop_rows=drop_rows)
         if gst_blocked:
             st.stop()
 

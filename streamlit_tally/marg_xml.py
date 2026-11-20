@@ -1,0 +1,613 @@
+"""
+Marg ERP 9+ "Tally Export" XML  ->  this app's Excel templates.
+
+Marg's Tally Export writes two Tally-import files:
+
+* the **masters** file (groups, ledgers, stock items)  -> Master — Ledger,
+  Master — Duties & Taxes and Master — Purchase/Sales Ledgers templates;
+* the **daybook** file (vouchers) -> Purchase / Sales and
+  Payment / Contra / Receipt templates.
+
+The templates are narrower than Tally's voucher model, so every voucher is
+checked before it is placed:
+
+* A Sales/Purchase voucher goes into the Purchase / Sales template only when
+  that template can reproduce it exactly — taxable value at 5/12/18/28 %,
+  CGST+SGST or IGST, round-off, and a whole-rupee invoice total.
+* Anything else (journals, credit notes, returns, purchases posted to other
+  ledgers…) is written as plain Dr/Cr rows in the Payment / Contra / Receipt
+  layout, which keeps every ledger and amount as Marg posted it.
+
+Nothing is dropped silently: each workbook's REVIEW list says what was moved
+or left out, and why. Pure Python/pandas, no Streamlit.
+"""
+
+import html
+import io
+import re
+from collections import Counter, defaultdict
+
+import pandas as pd
+from openpyxl import load_workbook
+
+import tally_core
+
+LEDGER_COLUMNS = [
+    "Ledger_Name", "Alias", "Group_Name", "Country", "State_Name", "Pincode",
+    "Registration_Type", "GST_NO", "Opening_Balance", "Dr/Cr", "Address",
+]
+DUTIES_COLUMNS = ["Ledger_Name", "Group_Name", "Rate_of_Tax", "Tax_Type"]
+PS_MASTER_COLUMNS = ["Ledger_Name", "Group_Name", "Nature_of_transaction",
+                     "RATE_OF_CGST_SGST", "RATE_OF_IGST"]
+PS_COLUMNS = [
+    "Supplier_Invoice", "Datetime", "Vch_Type", "PartyLedgerName",
+    "Dr_LedgerName", "Total_Amount", "GST_5", "GST_12", "GST_18", "GST_28",
+    "GST_5_IGST", "GST_12_IGST", "GST_18_IGST", "GST_28_IGST", "Narration",
+]
+PCR_COLUMNS = [
+    "DATE_TIME", "PartyLedgerName", "Dr_LedgerName", "Dr_Amount",
+    "Cr_LedgerName", "Cr_Amount", "Narration", "Vch_Type",
+    "NARRATION_1", "NARRATION_2",
+]
+REVIEW_COLUMNS = ["Vch_Type", "Voucher_No", "Date", "Party", "Amount",
+                  "Placed_In", "Reason"]
+MASTER_REVIEW_COLUMNS = ["Ledger_Name", "Marg_Group", "Reason"]
+
+GST_RATES = (5, 12, 18, 28)
+PCR_TYPES = ("Payment", "Receipt", "Contra")
+
+# Standard Tally groups, looked up by their letters/digits only: Marg drops
+# "&" and "/" from some group references ("DUTIES  TAXES").
+_STANDARD_GROUPS = [
+    "Branch / Divisions", "Capital Account", "Reserves & Surplus",
+    "Current Assets", "Bank Accounts", "Cash-in-Hand", "Deposits (Asset)",
+    "Loans & Advances (Asset)", "Stock-in-Hand", "Sundry Debtors",
+    "Current Liabilities", "Duties & Taxes", "Provisions", "Sundry Creditors",
+    "Fixed Assets", "Investments", "Loans (Liability)", "Bank OD A/c",
+    "Bank OCC A/c", "Secured Loans", "Unsecured Loans",
+    "Misc. Expenses (ASSET)", "Suspense A/c", "Direct Expenses",
+    "Indirect Expenses", "Direct Incomes", "Indirect Incomes",
+    "Purchase Accounts", "Sales Accounts",
+]
+# Marg's own names for groups that Tally calls something else.
+_GROUP_ALIASES = {
+    "SECURITYDEPOSITASSET": "Deposits (Asset)",
+    "LOANADVANCESASSET": "Loans & Advances (Asset)",
+    "SUSPENSEACCOUNTTEMPORARYACS": "Suspense A/c",
+    "SUSPENSEACCOUNT": "Suspense A/c",
+    "PURCHASEACCOUNT": "Purchase Accounts",
+    "SALESACCOUNT": "Sales Accounts",
+}
+_PROFIT_LOSS_KEYS = {"PROFITLOSSAC", "PROFITLOSSACCOUNT"}
+
+
+class MargXmlError(ValueError):
+    """The upload is not the Marg Tally-export file this page expects."""
+
+
+# --------------------------------------------------------------------------
+# Low-level helpers
+# --------------------------------------------------------------------------
+def decode_xml(raw_bytes):
+    """Decode the export: Marg writes plain ASCII/ANSI, Tally writes UTF-16."""
+    if raw_bytes[:2] in (b"\xff\xfe", b"\xfe\xff"):
+        return raw_bytes.decode("utf-16", errors="replace")
+    try:
+        return raw_bytes.decode("utf-8-sig")
+    except UnicodeDecodeError:
+        return raw_bytes.decode("cp1252", errors="replace")
+
+
+def _text(value):
+    """Unescape XML entities (&amp;, &#47;, …) and drop control characters."""
+    value = html.unescape(value)
+    return re.sub(r"[\x00-\x1f]", "", value).strip()
+
+
+def _tag(block, name):
+    m = re.search(r"<%s>([^<]*)</%s>" % (name, name), block)
+    return _text(m.group(1)) if m else ""
+
+
+def _key(name):
+    """Letters and digits only, upper-cased — for tolerant name matching."""
+    return re.sub(r"[^A-Z0-9]", "", name.upper())
+
+
+def _number(text):
+    try:
+        return float(text or 0)
+    except ValueError:
+        return 0.0
+
+
+def _rate_in(name):
+    """The GST rate in a ledger name ('GST LOCAL SALES 5 %' -> 5.0), or None."""
+    m = re.search(r"(\d+(?:\.\d+)?)\s*%", name)
+    return float(m.group(1)) if m else None
+
+
+def _tax_kind(name):
+    """'CGST' / 'SGST' / 'IGST' when the ledger name carries one, else ''."""
+    m = re.search(r"\b(CGST|SGST|IGST)\b", name.upper())
+    return m.group(1) if m else ""
+
+
+def _fmt_rate(rate):
+    return str(int(rate)) if float(rate).is_integer() else str(rate)
+
+
+# --------------------------------------------------------------------------
+# Masters
+# --------------------------------------------------------------------------
+_STANDARD_BY_KEY = {_key(g): g for g in _STANDARD_GROUPS}
+_STANDARD_BY_KEY.update(_GROUP_ALIASES)
+
+
+def _group_chain(group, parents):
+    """The group followed by its ancestors, as normalised keys."""
+    chain, seen, key = [], set(), _key(group)
+    while key and key not in seen:
+        seen.add(key)
+        chain.append(key)
+        key = parents.get(key, "")
+    return chain
+
+
+def _standard_group(group, parents):
+    """Nearest standard Tally group at or above ``group`` ('' if none)."""
+    for key in _group_chain(group, parents):
+        if key in _STANDARD_BY_KEY:
+            return _STANDARD_BY_KEY[key]
+    return ""
+
+
+def parse_masters(xml_text, standard_groups=True):
+    """Split Marg's masters file into the three master templates.
+
+    Returns a dict of DataFrames: ``ledger``, ``duties``, ``ps`` and
+    ``review`` (ledgers that were left out, with the reason), plus
+    ``counts`` with what else the file held.
+    """
+    ledger_blocks = re.findall(
+        r'<LEDGER NAME="([^"]*)"[^>]*>(.*?)</LEDGER>', xml_text, re.S)
+    if not ledger_blocks:
+        if "<VOUCHER " in xml_text:
+            raise MargXmlError(
+                "This is the daybook (vouchers) file — upload it on the "
+                "MARG Voucher page. This page needs the masters file.")
+        raise MargXmlError("No <LEDGER> records found. Upload the masters "
+                           "file written by Marg's Tally Export.")
+
+    parents = {}
+    for name, body in re.findall(
+            r'<GROUP NAME="([^"]*)"[^>]*>(.*?)</GROUP>', xml_text, re.S):
+        parents[_key(_text(name))] = _key(_tag(body, "PARENT"))
+
+    ledgers, duties, ps, review = [], [], [], []
+    for raw_name, body in ledger_blocks:
+        name = _text(raw_name)
+        marg_group = _tag(body, "PARENT")
+        chain = _group_chain(marg_group, parents)
+        std = _standard_group(marg_group, parents)
+
+        if _PROFIT_LOSS_KEYS & set(chain):
+            review.append({"Ledger_Name": name, "Marg_Group": marg_group,
+                           "Reason": "Profit & Loss A/c already exists in "
+                                     "Tally as a reserved ledger."})
+            continue
+
+        if std == "Duties & Taxes":
+            kind, rate = _tax_kind(name), _rate_in(name)
+            if kind and rate:
+                duties.append({
+                    "Ledger_Name": name, "Group_Name": "Duties & Taxes",
+                    "Rate_of_Tax": rate,
+                    "Tax_Type": {"CGST": "Central Tax", "SGST": "State Tax",
+                                 "IGST": "Integrated Tax"}[kind]})
+            else:
+                review.append({
+                    "Ledger_Name": name, "Marg_Group": marg_group,
+                    "Reason": "Duties & Taxes ledger without a CGST/SGST/IGST "
+                              "type and rate in its name — create it in Tally "
+                              "by hand if you use it."})
+            continue
+
+        if std in ("Purchase Accounts", "Sales Accounts"):
+            rate = _rate_in(name)
+            exempt = "EXEMPT" in name.upper() or rate == 0
+            if rate is None and not exempt:
+                review.append({
+                    "Ledger_Name": name, "Marg_Group": marg_group,
+                    "Reason": "Purchase/Sales ledger with no GST rate in its "
+                              "name — the nature of transaction can't be "
+                              "worked out; create it in Tally by hand."})
+                continue
+            side = "Purchase" if std == "Purchase Accounts" else "Sales"
+            central = ("CENTRAL" in name.upper()
+                       or any("CENTRAL" in k for k in chain))
+            nature = (("Interstate " if central else "") + side
+                      + (" Exempt" if exempt else " Taxable"))
+            ps.append({
+                "Ledger_Name": name, "Group_Name": std,
+                "Nature_of_transaction": nature,
+                "RATE_OF_CGST_SGST": 0 if exempt else rate,
+                "RATE_OF_IGST": 0 if exempt else rate})
+            continue
+
+        am = re.search(r"<ADDRESS\.LIST.*?</ADDRESS\.LIST>", body, re.S)
+        address = ", ".join(
+            p for p in (_text(a) for a in re.findall(
+                r"<ADDRESS>([^<]*)</ADDRESS>", am.group(0))) if p) if am else ""
+        gstin = _tag(body, "PARTYGSTIN") or _tag(body, "GSTIN")
+        opening = _number(_tag(body, "OPENINGBALANCE"))
+        group = (std if standard_groups else "") or marg_group
+        if standard_groups and not std:
+            review.append({
+                "Ledger_Name": name, "Marg_Group": marg_group,
+                "Reason": "Kept, but its Marg group has no standard Tally "
+                          "group above it — check Group_Name."})
+        ledgers.append({
+            "Ledger_Name": name,
+            "Alias": "",
+            "Group_Name": group,
+            "Country": _tag(body, "COUNTRYNAME").title() or "India",
+            "State_Name": _tag(body, "LEDSTATENAME") or _tag(body, "STATE"),
+            "Pincode": _tag(body, "PINCODE"),
+            # Blank would be read as "Regular" by the converter and then fail
+            # its GST-number check, so a ledger without a GSTIN is Unregistered.
+            "Registration_Type": (_tag(body, "GSTREGISTRATIONTYPE")
+                                  or ("Regular" if gstin else "Unregistered")),
+            "GST_NO": gstin,
+            # Tally XML: a negative opening balance is a debit.
+            "Opening_Balance": abs(opening),
+            "Dr/Cr": "Cr" if opening > 0 else "Dr",
+            "Address": address,
+        })
+
+    counts = Counter(re.findall(r"<TALLYMESSAGE[^>]*>\s*<([A-Z]+)", xml_text))
+    return {
+        "ledger": pd.DataFrame(ledgers, columns=LEDGER_COLUMNS),
+        "duties": pd.DataFrame(duties, columns=DUTIES_COLUMNS),
+        "ps": pd.DataFrame(ps, columns=PS_MASTER_COLUMNS),
+        "review": pd.DataFrame(review, columns=MASTER_REVIEW_COLUMNS),
+        "counts": dict(counts),
+    }
+
+
+def duplicate_names(df):
+    """Ledger names that occur more than once, ignoring case."""
+    key = df["Ledger_Name"].str.upper()
+    return sorted(df.loc[key.duplicated(keep=False), "Ledger_Name"].unique())
+
+
+# --------------------------------------------------------------------------
+# Vouchers
+# --------------------------------------------------------------------------
+_INVENTORY_RE = re.compile(
+    r"<(ALLINVENTORYENTRIES|INVENTORYALLOCATIONS)\.LIST>(.*?)</\1\.LIST>", re.S)
+_LEDGER_ENTRY_RE = re.compile(
+    r"<(ALLLEDGERENTRIES|LEDGERENTRIES)\.LIST>(.*?)</\1\.LIST>", re.S)
+_ACC_ALLOC_RE = re.compile(
+    r"<ACCOUNTINGALLOCATIONS\.LIST>(.*?)</ACCOUNTINGALLOCATIONS\.LIST>", re.S)
+
+
+def _is_round_off(name):
+    return _key(name) in ("ROUNDOFF", "ROUNDEDOFF", "ROUNDINGOFF")
+
+
+def _parse_voucher(vch_type, body):
+    """One voucher -> dict with its party and every (ledger, amount) posting.
+
+    Amounts keep Tally's sign: negative = debit, positive = credit. Stock
+    lines are folded into the ledgers they are allocated to; a stock line
+    nested inside a ledger entry is already counted in that entry's amount.
+    """
+    inventory = _INVENTORY_RE.findall(body)
+    rest = _INVENTORY_RE.sub("", body)
+    party, entries = "", []
+    for _, entry in _LEDGER_ENTRY_RE.findall(rest):
+        name = _tag(entry, "LEDGERNAME")
+        entries.append((name, _number(_tag(entry, "AMOUNT"))))
+        if not party and _tag(entry, "ISPARTYLEDGER") == "Yes":
+            party = name
+    for _, item in inventory:
+        for alloc in _ACC_ALLOC_RE.findall(item):
+            entries.append((_tag(alloc, "LEDGERNAME"),
+                            _number(_tag(alloc, "AMOUNT"))))
+    date = _tag(body, "DATE")
+    return {
+        "type": vch_type,
+        "number": _tag(body, "VOUCHERNUMBER") or _tag(body, "REFERENCE"),
+        "date": (f"{date[6:8]}/{date[4:6]}/{date[0:4]}"
+                 if re.fullmatch(r"\d{8}", date) else date),
+        "narration": _tag(body, "NARRATION"),
+        "party": party or _tag(body, "PARTYLEDGERNAME"),
+        "entries": entries,
+    }
+
+
+def parse_vouchers(xml_text):
+    """Every <VOUCHER> in the daybook file as a list of dicts."""
+    blocks = re.findall(
+        r'<VOUCHER VCHTYPE="([^"]*)"[^>]*>(.*?)</VOUCHER>', xml_text, re.S)
+    if not blocks:
+        if "<LEDGER NAME=" in xml_text:
+            raise MargXmlError(
+                "This is the masters file — upload it on the MARG Master "
+                "page. This page needs the daybook (vouchers) file.")
+        raise MargXmlError("No <VOUCHER> records found. Upload the daybook "
+                           "file written by Marg's Tally Export.")
+    return [_parse_voucher(_text(t), b) for t, b in blocks]
+
+
+def _fit_purchase_sales(voucher):
+    """Can the Purchase / Sales template reproduce this voucher exactly?
+
+    Returns (fit, reason). ``fit`` holds the taxable value per template
+    column and the ledger Marg used for each column; ``reason`` explains a
+    refusal.
+    """
+    side = voucher["type"]                      # "Sales" or "Purchase"
+    sign = 1 if side == "Sales" else -1         # sales income is a credit
+    word = "SALE" if side == "Sales" else "PURCHASE"
+    party_total, taxable, taxes, names = 0.0, Counter(), Counter(), {}
+    party_seen = False
+    for name, amount in voucher["entries"]:
+        if name == voucher["party"] and not party_seen:
+            party_seen, party_total = True, -amount * sign
+            continue
+        if _is_round_off(name):
+            continue
+        rate, kind = _rate_in(name), _tax_kind(name)
+        if kind and rate:
+            taxes[(kind, rate)] += amount * sign
+            names.setdefault(f"{_fmt_rate(rate)}_{kind}", name)
+        elif rate in GST_RATES and word in name.upper():
+            central = "CENTRAL" in name.upper()
+            column = f"GST_{int(rate)}" + ("_IGST" if central else "")
+            taxable[column] += amount * sign
+            if names.setdefault(column, name) != name:
+                return None, (f"uses two ledgers for {column} "
+                              f"({names[column]} and {name})")
+        else:
+            return None, f"posts to '{name}', which the template has no column for"
+
+    if not party_seen or not taxable:
+        return None, "has no taxable value on a GST sales/purchase ledger"
+    if party_total <= 0 or any(v <= 0 for v in taxable.values()):
+        return None, "has amounts on the opposite side to a normal bill"
+    if abs(party_total - round(party_total)) > 0.005:
+        return None, ("invoice total is not a whole rupee; the template "
+                      "rounds totals, which would change the party amount")
+
+    expected = Counter()
+    for column, value in taxable.items():
+        rate = int(column.split("_")[1])
+        if column.endswith("_IGST"):
+            expected[("IGST", float(rate))] += value * rate / 100
+        else:
+            expected[("CGST", rate / 2)] += value * rate / 200
+            expected[("SGST", rate / 2)] += value * rate / 200
+    for key in set(expected) | set(taxes):
+        if abs(expected[key] - taxes[key]) > 0.5:
+            return None, (f"{key[0]} {_fmt_rate(key[1])}% in Marg is "
+                          f"{taxes[key]:.2f}, but the template would compute "
+                          f"{expected[key]:.2f}")
+    return {"total": round(party_total), "taxable": dict(taxable),
+            "names": names}, ""
+
+
+def _dr_cr_rows(voucher):
+    """Break a voucher into balanced one-debit / one-credit rows.
+
+    Each debit is matched against the credits in order, so every ledger ends
+    up with exactly the amount Marg posted even when a voucher has several
+    lines on both sides.
+    """
+    debits = [[n, round(-a, 2)] for n, a in voucher["entries"] if a < 0]
+    credits = [[n, round(a, 2)] for n, a in voucher["entries"] if a > 0]
+    rows, d, c = [], 0, 0
+    while d < len(debits) and c < len(credits):
+        amount = round(min(debits[d][1], credits[c][1]), 2)
+        if amount > 0:
+            rows.append({
+                "DATE_TIME": voucher["date"],
+                "PartyLedgerName": voucher["party"],
+                "Dr_LedgerName": debits[d][0], "Dr_Amount": amount,
+                "Cr_LedgerName": credits[c][0], "Cr_Amount": amount,
+                "Narration": voucher["narration"],
+                "Vch_Type": voucher["type"],
+                "NARRATION_1": "", "NARRATION_2": "",
+            })
+        debits[d][1] = round(debits[d][1] - amount, 2)
+        credits[c][1] = round(credits[c][1] - amount, 2)
+        if debits[d][1] <= 0:
+            d += 1
+        if credits[c][1] <= 0:
+            c += 1
+    return rows
+
+
+def _default_links(side):
+    """Marg's standard ledger names for every MASTER_LEDGER_NAME_LINK row."""
+    word = "SALES" if side == "Sales" else "PURCHASE"
+    links = {}
+    for rate in GST_RATES:
+        half = _fmt_rate(rate / 2)
+        links[f"GST_{rate}"] = f"GST LOCAL {word} {rate} %"
+        links[f"GST_{rate}_IGST"] = f"GST CENTRAL {word} {rate} %"
+        links[f"{half}_CGST"] = f"CGST {word} TAX {half} %"
+        links[f"{half}_SGST"] = f"SGST {word} TAX {half} %"
+        links[f"{rate}_IGST"] = f"IGST {word} TAX {rate} %"
+    return links
+
+
+def convert_vouchers(vouchers):
+    """Place every voucher into a template layout.
+
+    Returns a dict:
+      ``sales`` / ``purchase``  rows for the Purchase / Sales template,
+      ``sales_links`` / ``purchase_links``  its MASTER_LEDGER_NAME_LINK values,
+      ``pcr``    Payment / Receipt / Contra rows,
+      ``other``  every other voucher as Dr/Cr rows (same layout as ``pcr``),
+      ``review`` what was moved, split or left out, and why,
+      ``summary`` voucher counts per type and destination.
+    """
+    ps_rows = {"Sales": [], "Purchase": []}
+    link_votes = {"Sales": defaultdict(Counter), "Purchase": defaultdict(Counter)}
+    pcr_rows, other_rows, review, summary = [], [], [], Counter()
+
+    def note(voucher, placed, reason):
+        total = sum(a for _, a in voucher["entries"] if a > 0)
+        review.append({
+            "Vch_Type": voucher["type"], "Voucher_No": voucher["number"],
+            "Date": voucher["date"], "Party": voucher["party"],
+            "Amount": round(total, 2), "Placed_In": placed, "Reason": reason})
+
+    def as_rows(voucher, target, label, reason=None):
+        if abs(sum(a for _, a in voucher["entries"])) > 0.01:
+            note(voucher, "Left out", "debits and credits do not balance")
+            summary[(voucher["type"], "Left out")] += 1
+            return
+        rows = _dr_cr_rows(voucher)
+        if not rows:
+            note(voucher, "Left out", "voucher has no amounts")
+            summary[(voucher["type"], "Left out")] += 1
+            return
+        target.extend(rows)
+        summary[(voucher["type"], label)] += 1
+        if reason:
+            note(voucher, label, reason)
+        elif len(rows) > 1:
+            note(voucher, label,
+                 f"has more than one debit or credit line, so it is written "
+                 f"as {len(rows)} rows (one voucher each in Tally)")
+
+    for voucher in vouchers:
+        kind = voucher["type"]
+        if kind in ps_rows:
+            fit, reason = _fit_purchase_sales(voucher)
+            if fit:
+                # GST columns stay empty (None), not "", so they remain numeric.
+                row = dict.fromkeys(PS_COLUMNS)
+                row.update({
+                    "Supplier_Invoice": voucher["number"],
+                    "Datetime": voucher["date"], "Vch_Type": kind,
+                    "PartyLedgerName": voucher["party"],
+                    # The template posts Total_Amount to this ledger.
+                    "Dr_LedgerName": voucher["party"],
+                    "Total_Amount": fit["total"],
+                    "Narration": voucher["narration"]})
+                row.update({c: round(v, 2) for c, v in fit["taxable"].items()})
+                ps_rows[kind].append((row, fit["names"]))
+                for column, name in fit["names"].items():
+                    link_votes[kind][column][name] += 1
+            else:
+                as_rows(voucher, other_rows, "Other vouchers", reason)
+        elif kind in PCR_TYPES:
+            as_rows(voucher, pcr_rows, "Payment / Contra / Receipt")
+        else:
+            as_rows(voucher, other_rows, "Other vouchers",
+                    f"{kind} vouchers have no template of their own, so they "
+                    f"are written as Dr/Cr rows")
+
+    result = {}
+    by_number = {(v["type"], v["number"]): v for v in vouchers}
+    for kind, key in (("Sales", "sales"), ("Purchase", "purchase")):
+        # One link sheet per workbook: a column can name only one ledger, so
+        # the commonest ledger wins and any bill using another is moved out.
+        links = _default_links(kind)
+        links.update({col: votes.most_common(1)[0][0]
+                      for col, votes in link_votes[kind].items()})
+        kept = []
+        for row, names in ps_rows[kind]:
+            clash = next((c for c, n in names.items() if links[c] != n), None)
+            if clash:
+                as_rows(by_number[(kind, row["Supplier_Invoice"])], other_rows,
+                        "Other vouchers",
+                        f"uses '{names[clash]}' where the other bills use "
+                        f"'{links[clash]}' for {clash}")
+            else:
+                kept.append(row)
+                summary[(kind, "Purchase / Sales")] += 1
+        result[key] = pd.DataFrame(kept, columns=PS_COLUMNS)
+        result[key + "_links"] = links
+
+    result["pcr"] = pd.DataFrame(pcr_rows, columns=PCR_COLUMNS)
+    result["other"] = pd.DataFrame(other_rows, columns=PCR_COLUMNS)
+    result["review"] = pd.DataFrame(review, columns=REVIEW_COLUMNS)
+    result["summary"] = pd.DataFrame(
+        [{"Vch_Type": t, "Placed_In": p, "Vouchers": n}
+         for (t, p), n in sorted(summary.items())],
+        columns=["Vch_Type", "Placed_In", "Vouchers"])
+    return result
+
+
+# --------------------------------------------------------------------------
+# Excel output — always written into this app's own blank templates.
+# --------------------------------------------------------------------------
+def fill_template(template_bytes, df, links=None, review=None):
+    """Write ``df`` into the template's TEMPLATE sheet (bytes in, bytes out).
+
+    ``links`` fills MASTER_LEDGER_NAME_LINK; ``review`` adds a REVIEW sheet.
+    """
+    wb = load_workbook(io.BytesIO(template_bytes))
+    ws = wb["TEMPLATE"]
+    headers = [cell.value for cell in ws[1]]
+    columns = [(headers.index(c) + 1, c) for c in df.columns if c in headers]
+    for r, record in enumerate(df.to_dict("records"), start=2):
+        for col, name in columns:
+            value = record[name]
+            if value != "" and not pd.isna(value):
+                ws.cell(row=r, column=col, value=value)
+    if links and "MASTER_LEDGER_NAME_LINK" in wb.sheetnames:
+        ws2 = wb["MASTER_LEDGER_NAME_LINK"]
+        for r in range(2, ws2.max_row + 1):
+            key = str(ws2.cell(row=r, column=1).value)
+            if key in links:
+                ws2.cell(row=r, column=2, value=links[key])
+    if review is not None and not review.empty:
+        ws3 = wb.create_sheet("REVIEW")
+        ws3.append(list(review.columns))
+        for record in review.itertuples(index=False):
+            ws3.append(list(record))
+    out = io.BytesIO()
+    wb.save(out)
+    return out.getvalue()
+
+
+def master_workbooks(parsed):
+    """{file name: xlsx bytes} for the masters, skipping empty templates."""
+    books = {}
+    if not parsed["ledger"].empty:
+        books["Master_Ledger.xlsx"] = fill_template(
+            tally_core.template_master_ledger(), parsed["ledger"],
+            review=parsed["review"])
+    if not parsed["duties"].empty:
+        books["Master_Duties_Taxes.xlsx"] = fill_template(
+            tally_core.template_master_duties(), parsed["duties"])
+    if not parsed["ps"].empty:
+        books["Master_Purchase_Sales_Ledgers.xlsx"] = fill_template(
+            tally_core.template_master_ps(), parsed["ps"])
+    return books
+
+
+def voucher_workbooks(converted):
+    """{file name: xlsx bytes} for the vouchers, skipping empty templates."""
+    review = converted["review"]
+    books = {}
+    for key, name in (("sales", "Sales.xlsx"), ("purchase", "Purchase.xlsx")):
+        if not converted[key].empty:
+            books[name] = fill_template(
+                tally_core.template_purchase(), converted[key],
+                links=converted[key + "_links"])
+    if not converted["pcr"].empty:
+        books["Pay_Con_Rec.xlsx"] = fill_template(
+            tally_core.template_pay_con_rec(), converted["pcr"],
+            review=review[review["Placed_In"] == "Payment / Contra / Receipt"])
+    if not converted["other"].empty:
+        books["Other_Vouchers.xlsx"] = fill_template(
+            tally_core.template_pay_con_rec(), converted["other"],
+            review=review[review["Placed_In"] != "Payment / Contra / Receipt"])
+    return books

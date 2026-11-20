@@ -30,6 +30,9 @@ import bank_pdf
 import excel_compare
 import excel_merge
 import gstr1_json
+import marg_dbf
+import marg_xml
+import tally_log
 
 # Load OPENAI_API_KEY (and any other vars) from a .env file if present.
 try:
@@ -231,6 +234,10 @@ BANK_PDF_TOOL = "Bank Statement PDF → Pay/Contra/Receipt"
 CONSOLIDATE_TOOL = "Consolidate Excel Files"
 GSTR1_JSON_TOOL = "GSTR-1 JSON → Excel"
 COMPARE_TOOL = "Find Missing Values (Excel A vs B)"
+ERROR_LOG_TOOL = "Tally Error Log Viewer"
+MARG_MASTER_TOOL = "MARG Master (Tally Export)"
+MARG_VOUCHER_TOOL = "MARG Voucher (Tally Export)"
+MARG_LEDGER_TOOL = "MARG Ledger DBF → Master — Ledger"
 
 
 @st.cache_data(show_spinner=False)
@@ -1406,8 +1413,11 @@ st.sidebar.caption("Excel → Tally XML converter")
 # Sidebar sections. Each is its own radio, but together they act as a single
 # choice: picking an option in one section clears the others.
 TOOL_SECTIONS = {
-    "Tally Functionality": list(TOOLS.keys()) + [BANK_PDF_TOOL],
+    "Tally Functionality": list(TOOLS.keys()) + [BANK_PDF_TOOL,
+                                                ERROR_LOG_TOOL],
     "Tally Reverse Functionality": [MASTER_XML_TOOL, ODBC_TOOL],
+    "MARG to Tally Converter": [MARG_MASTER_TOOL, MARG_VOUCHER_TOOL,
+                                MARG_LEDGER_TOOL],
     "Excel Functionality": [CONSOLIDATE_TOOL, GSTR1_JSON_TOOL, COMPARE_TOOL],
 }
 
@@ -1438,6 +1448,620 @@ for i, (section, options) in enumerate(TOOL_SECTIONS.items()):
                  on_change=_select_tool, args=(key,))
 
 tool_name = st.session_state["active_tool"]
+
+# ==========================================================================
+# Tally error log viewer: reads tally.imp, the log Tally appends to on every
+# import, and lists the imports newest first with their errors.
+# ==========================================================================
+@st.cache_data(show_spinner=False)
+def parse_tally_log(raw_bytes):
+    return tally_log.parse_import_log(tally_log.decode_log(raw_bytes))
+
+
+if tool_name == ERROR_LOG_TOOL:
+    st.title(ERROR_LOG_TOOL)
+    st.info(
+        "Shows what happened on each Tally import, newest first. Tally "
+        "writes this log to `tally.imp` in its program folder every time "
+        "you import a file.")
+
+    log_path = st.text_input(
+        "Log file path", value=tally_log.DEFAULT_LOG_PATH,
+        key="tally_log_path",
+        help="Where Tally keeps tally.imp on this computer. Change it if "
+             "Tally is installed in another folder.")
+    c1, c2 = st.columns([3, 1])
+    log_upload = c1.file_uploader(
+        "Or upload a tally.imp file (optional)", type=["imp", "txt", "log"],
+        key="uploader_tally_log")
+    c2.write("")
+    c2.write("")
+    c2.button("🔄 Reload", key="tally_log_reload", use_container_width=True,
+              help="Read the log file again after a new import.")
+
+    log_bytes, log_source = None, ""
+    if log_upload is not None:
+        log_bytes, log_source = log_upload.getvalue(), log_upload.name
+    else:
+        path = log_path.strip().strip('"')
+        try:
+            with open(path, "rb") as fh:
+                log_bytes, log_source = fh.read(), path
+        except FileNotFoundError:
+            st.warning(
+                f"No log file at `{path}`. Check the path, or upload the "
+                "file above. The path only works when this app runs on the "
+                "same computer as Tally.")
+        except OSError as exc:
+            st.error(f"Could not read `{path}`: {exc}")
+    if log_bytes is None:
+        st.stop()
+
+    log_runs = parse_tally_log(log_bytes)
+    if not log_runs:
+        st.warning("No import entries found in this file. Make sure it is "
+                   "Tally's `tally.imp` log.")
+        st.stop()
+
+    failed_runs = [r for r in log_runs if r["errors"] or r["counts"]["Errors"]]
+    total_errors = sum(max(len(r["errors"]), r["counts"]["Errors"])
+                       for r in log_runs)
+    st.caption(f"Reading `{log_source}`")
+    m1, m2, m3, m4 = st.columns(4)
+    m1.metric("Imports", len(log_runs))
+    m2.metric("With errors", len(failed_runs))
+    m3.metric("Total errors", total_errors)
+    m4.metric("Latest import", log_runs[0]["when"].strftime("%d %b %Y")
+              if log_runs[0]["when"] else log_runs[0]["when_text"])
+
+    f1, f2 = st.columns([1, 2])
+    only_errors = f1.toggle("Only imports with errors", value=True,
+                            key="tally_log_only_errors")
+    companies = sorted({r["company"] for r in log_runs if r["company"]})
+    chosen = f2.multiselect("Company", companies, key="tally_log_companies",
+                            placeholder="All companies")
+    search = st.text_input(
+        "Search", key="tally_log_search",
+        placeholder="Ledger name, file name or error text")
+
+    def _matches(run):
+        if only_errors and run not in failed_runs:
+            return False
+        if chosen and run["company"] not in chosen:
+            return False
+        if search.strip():
+            haystack = " ".join(
+                [run["file"], run["company"]]
+                + [f"{e['kind']} {e['subject']} {e['detail']}"
+                   for e in run["errors"]]).lower()
+            return search.strip().lower() in haystack
+        return True
+
+    shown_runs = [r for r in log_runs if _matches(r)]
+    if not shown_runs:
+        st.success("No errors — every import in this log went through."
+                   if only_errors and not failed_runs
+                   else "No imports match these filters.")
+        st.stop()
+    st.caption(f"Showing {len(shown_runs)} of {len(log_runs)} import(s), "
+               "newest first.")
+
+    for run in shown_runs:
+        counts = run["counts"]
+        n_errors = max(len(run["errors"]), counts["Errors"])
+        when = (run["when"].strftime("%d %b %Y, %I:%M %p")
+                if run["when"] else run["when_text"])
+        with st.container(border=True):
+            top, badge = st.columns([4, 1])
+            top.markdown(f"**{run['file_name']}**  \n{when}")
+            if n_errors:
+                badge.error(f"{n_errors} error{'s' if n_errors != 1 else ''}")
+            else:
+                badge.success("OK")
+            st.caption(f"Company: {run['company'] or '—'}  ·  "
+                       f"File: `{run['file']}`")
+            st.markdown("  ·  ".join(
+                f"{key} **{counts[key]}**"
+                for key in tally_log.COUNT_KEYS if key != "Errors"))
+            for err in run["errors"]:
+                st.markdown(
+                    f"🔴 **{err['kind']}: {err['subject']}**  \n"
+                    f"{err['detail']}")
+                if err["hint"]:
+                    st.caption("💡 " + err["hint"])
+            unlisted = counts["Errors"] - len(run["errors"])
+            if unlisted > 0:
+                st.markdown(
+                    f"🔴 **{unlisted} error{'s' if unlisted != 1 else ''} "
+                    "without details**  \nTally counted "
+                    f"{'them' if unlisted != 1 else 'it'} in the summary but "
+                    "did not write the reason to the log.")
+
+    st.stop()
+
+
+# ==========================================================================
+# Marg ERP 9+  ->  Tally, using Marg's own "Tally Export". These two pages are
+# instructions only: Marg writes Tally-importable files itself. The steps and
+# labels follow Marg's help pages (care.margcompusoft.com) for ERP 9+.
+# ==========================================================================
+MARG_TALLY_EXPORT_PATH = (
+    "**Reports > Management Report > Utilities > Data Import/Export > "
+    "Tally/Busy/ Export/Import**")
+
+
+def marg_tally_export_prerequisites():
+    """The checks Marg asks for before its Tally Export will open."""
+    st.subheader("Before you start")
+    st.markdown(
+        """
+- **Close Marg on every other node / client machine.** The export must run
+  with only one system logged in.
+- **Export rights must be on.**
+    - For the company: **Masters > Marg Setups > Control Room**, search
+      **Export Import**, set *Option of Data Import/Export/Both/Not Required*
+      to **Both** and *Data Import/Export/Y-Both/No* to **Y**.
+    - For your user: **Masters > Passwords & Powers > Operator's**, select the
+      user, search **Export** and enable it.
+    - Press **Esc** and choose **Yes** to save, then log in again (**Ctrl+U**).
+- **Update Marg's Tally patch** if the Tally/Busy option does not open.
+- **Tally** must be a licensed copy, on the same machine or one you can copy
+  the exported files to.
+"""
+    )
+
+
+@st.cache_data(show_spinner=False)
+def marg_masters_from_xml(file_bytes, standard_groups):
+    """Masters XML -> (parsed tables, {file name: xlsx bytes}), cached."""
+    parsed = marg_xml.parse_masters(marg_xml.decode_xml(file_bytes),
+                                    standard_groups=standard_groups)
+    return parsed, marg_xml.master_workbooks(parsed)
+
+
+@st.cache_data(show_spinner=False)
+def marg_vouchers_from_xml(file_bytes):
+    """Daybook XML -> (converted tables, {file name: xlsx bytes}), cached."""
+    converted = marg_xml.convert_vouchers(
+        marg_xml.parse_vouchers(marg_xml.decode_xml(file_bytes)))
+    return converted, marg_xml.voucher_workbooks(converted)
+
+
+def marg_workbook_downloads(books, zip_name, key_prefix):
+    """One download button per workbook, plus everything as a .zip."""
+    for name, data in books.items():
+        st.download_button(f"⬇️ {name}", data=data, file_name=name,
+                           mime=XLSX_MIME, key=f"{key_prefix}_{name}",
+                           use_container_width=True)
+    if len(books) > 1:
+        buf = io.BytesIO()
+        with zipfile.ZipFile(buf, "w", zipfile.ZIP_DEFLATED) as zf:
+            for name, data in books.items():
+                zf.writestr(name, data)
+        st.download_button("⬇️ Download all (.zip)", data=buf.getvalue(),
+                           file_name=zip_name, mime="application/zip",
+                           key=f"{key_prefix}_zip", type="primary",
+                           use_container_width=True)
+
+
+def marg_tally_export_footer():
+    st.caption(
+        "Steps follow Marg's help pages for Marg ERP 9+. Option names can "
+        "differ slightly between Marg versions — press **F1** on any Marg "
+        "screen for its built-in help.")
+
+
+if tool_name == MARG_MASTER_TOOL:
+    st.title(MARG_MASTER_TOOL)
+    st.info(
+        "Move your **masters** (ledgers, and stock items if you keep "
+        "inventory) from Marg ERP 9+ into Tally using Marg's built-in "
+        "**Tally Export**. Do this before exporting vouchers — Tally needs "
+        "the masters to exist first."
+    )
+    marg_tally_export_prerequisites()
+
+    st.divider()
+    st.subheader("Step 1 — Export the masters from Marg")
+    st.markdown(
+        f"""
+1. In Marg, go to {MARG_TALLY_EXPORT_PATH}.
+2. Choose your Tally version — **Tally 9 Import/Export** for Tally.ERP 9, or
+   **Tally Prime** — and click **Okay**.
+3. In the **Tally Import/Export** window, set **Import/Export** to
+   **Export Marg to Tally**.
+4. In **Export Options**, select **Masters**.
+5. Set **Include Inventory** to **Yes** if you want stock items as well as
+   ledgers; otherwise **No**.
+6. In **Master File**, browse to the folder where the masters file should be
+   saved, and note that folder.
+7. Click **Proceed** and wait for the export to finish.
+"""
+    )
+
+    st.divider()
+    st.subheader("Step 2 — Import the masters into Tally")
+    prime_tab, erp9_tab = st.tabs(["Tally Prime", "Tally.ERP 9"])
+    prime_tab.markdown(
+        """
+1. Open the company in Tally Prime (create it first if it is new, with the
+   same financial year as Marg).
+2. Press **Alt + O** (Import) and choose **Masters**.
+3. In **File path**, select the masters file Marg saved in Step 1.
+4. Set the behaviour for existing masters to **Modify with new data**.
+5. Press **Enter** to import.
+"""
+    )
+    erp9_tab.markdown(
+        """
+1. Open the company (**Alt + F3** to create it, with the same financial year
+   and books-beginning date as Marg).
+2. Press **F12 > General** and set **Import/Export Configuration** to **Yes**.
+3. Press **F11 > Statutory & Taxation** and enable **GST**.
+4. From **Gateway of Tally**, choose **Import Data > Masters**.
+5. Enter the path of the masters file Marg saved in Step 1 and press
+   **Enter**.
+6. Choose **Modify with New Data**.
+"""
+    )
+
+    st.divider()
+    st.subheader("Step 3 — Or convert the masters file to Excel")
+    st.caption(
+        "Instead of importing Marg's file straight into Tally, upload it "
+        "here to get it in this app's **Master** templates, where you can "
+        "review and edit it before converting to Tally XML.")
+    masters_file = st.file_uploader(
+        "Upload the masters XML written by Marg's Tally Export",
+        type=["xml"], key="uploader_marg_master_xml")
+    if masters_file is not None:
+        group_style = st.radio(
+            "Group names", ["Standard Tally groups", "Marg's own groups"],
+            horizontal=True, key="marg_master_group_style",
+            help="Marg has its own sub-groups, such as SUNDRY CREDITORS "
+                 "(SUPPLIERS). Standard moves each ledger up to the Tally "
+                 "group above it, which already exists in every company.")
+        try:
+            parsed, books = marg_masters_from_xml(
+                masters_file.getvalue(), group_style == "Standard Tally groups")
+        except marg_xml.MargXmlError as exc:
+            st.error(str(exc))
+            st.stop()
+
+        st.success(
+            f"{len(parsed['ledger'])} ledger(s), {len(parsed['duties'])} "
+            f"duties & taxes ledger(s) and {len(parsed['ps'])} purchase/sales "
+            f"ledger(s) converted; {len(parsed['review'])} need a look.")
+        stock_items = parsed["counts"].get("STOCKITEM", 0)
+        if stock_items:
+            st.caption(
+                f"The file also holds {stock_items} stock item(s). This app "
+                "has no stock-item template, so they are not converted.")
+        dupes = marg_xml.duplicate_names(parsed["ledger"])
+        if dupes:
+            st.warning(
+                f"{len(dupes)} ledger name(s) appear more than once. Tally "
+                "keeps one ledger per name, so rename or remove the extras: "
+                + ", ".join(f"**{n}**" for n in dupes))
+
+        tabs = st.tabs(["Ledgers", "Duties & Taxes", "Purchase/Sales ledgers",
+                        f"Needs a look ({len(parsed['review'])})"])
+        for tab, key in zip(tabs, ("ledger", "duties", "ps", "review")):
+            tab.dataframe(parsed[key], use_container_width=True,
+                          hide_index=True)
+        tabs[3].caption(
+            "These ledgers are not in the Excel files, apart from any marked "
+            "'Kept'. The same list is on the REVIEW sheet of "
+            "Master_Ledger.xlsx.")
+
+        marg_workbook_downloads(books, "Marg_Masters.zip", "marg_master_dl")
+        st.caption(
+            "Each file matches the template of the tool with the same name "
+            "under **Tally Functionality** — upload it there to get the "
+            "Tally XML.")
+
+    st.divider()
+    st.subheader("If something goes wrong")
+    st.markdown(
+        """
+- **A master is rejected** — a special character in a ledger or item name is
+  the usual cause. Rename it in Marg and export again.
+- **Marg writes an `EXP` log and Tally an `IMP` log** listing what failed.
+- **You only need the ledgers, or want to review them first** — use
+  **MARG Ledger DBF → Master — Ledger** in this section instead.
+"""
+    )
+    marg_tally_export_footer()
+    st.stop()
+
+
+if tool_name == MARG_VOUCHER_TOOL:
+    st.title(MARG_VOUCHER_TOOL)
+    st.info(
+        "Move your **vouchers** (the day book: sales, purchases, receipts, "
+        "payments…) from Marg ERP 9+ into Tally using Marg's built-in "
+        "**Tally Export**. Import the **masters** into Tally first — see "
+        "**MARG Master (Tally Export)**."
+    )
+    marg_tally_export_prerequisites()
+
+    st.divider()
+    st.subheader("Step 1 — Export the vouchers from Marg")
+    st.markdown(
+        f"""
+1. In Marg, go to {MARG_TALLY_EXPORT_PATH}.
+2. Choose your Tally version — **Tally 9 Import/Export** for Tally.ERP 9, or
+   **Tally Prime** — and click **Okay**.
+3. In the **Tally Import/Export** window, set **Import/Export** to
+   **Export Marg to Tally**.
+4. In **Export Options**, select **Transactions**. (Select both **Masters**
+   and **Transactions** to export everything in one go.)
+5. Set **Include Inventory** to **Yes** if your bills carry stock items.
+6. In **Daybook File**, browse to the folder where the vouchers file should
+   be saved, and note that folder.
+7. In **Voucher Definition**, select the **Sales Return** and
+   **Purchase Return** ledgers. Marg asks for these because Tally has no
+   such ledgers of its own; skipping this leaves return vouchers without a
+   ledger.
+8. In **Voucher From**, enter the from and to dates of the vouchers to
+   export.
+9. Click **Proceed** and wait for the export to finish.
+"""
+    )
+
+    st.divider()
+    st.subheader("Step 2 — Import the vouchers into Tally")
+    prime_tab, erp9_tab = st.tabs(["Tally Prime", "Tally.ERP 9"])
+    prime_tab.markdown(
+        """
+1. Open the company and make sure the masters are already imported.
+2. Set the period (**Alt + F2**) to cover the voucher dates.
+3. Press **Alt + O** (Import) and choose **Transactions**.
+4. In **File path**, select the daybook file Marg saved in Step 1.
+5. Press **Enter** to import.
+"""
+    )
+    erp9_tab.markdown(
+        """
+1. Open the company and make sure the masters are already imported.
+2. Press **Alt + F2** and set the from and to dates to cover the vouchers.
+3. From **Gateway of Tally**, choose **Import Data > Vouchers**.
+4. Enter the path of the daybook file Marg saved in Step 1 and press
+   **Enter**.
+5. Choose **Modify with New Data**.
+"""
+    )
+
+    st.divider()
+    st.subheader("Step 3 — Check the totals")
+    st.markdown(
+        """
+Compare **Profit & Loss** in Tally with Marg — the purchase and sale totals
+should match.
+
+- **"Ledger not found" in Tally** — import the masters again, then the
+  vouchers.
+- **"Stock item not found"** — export again with **Include Inventory** set
+  to **Yes**.
+- **A total is off by a small amount** — in Marg open
+  **Books > Entry Books > Day Book**, go to the voucher and press **F8** to
+  see what is wrong with it.
+- **Marg writes an `EXP` log and Tally an `IMP` log** listing what failed.
+"""
+    )
+
+    st.divider()
+    st.subheader("Step 4 — Or convert the daybook file to Excel")
+    st.caption(
+        "Instead of importing Marg's file straight into Tally, upload it "
+        "here to get the vouchers in this app's **Purchase / Sales** and "
+        "**Payment / Contra / Receipt** templates.")
+    daybook_file = st.file_uploader(
+        "Upload the daybook XML written by Marg's Tally Export",
+        type=["xml"], key="uploader_marg_daybook_xml")
+    if daybook_file is not None:
+        try:
+            with st.spinner("Reading vouchers…"):
+                converted, books = marg_vouchers_from_xml(
+                    daybook_file.getvalue())
+        except marg_xml.MargXmlError as exc:
+            st.error(str(exc))
+            st.stop()
+
+        summary = converted["summary"]
+        st.success(f"{int(summary['Vouchers'].sum())} voucher(s) read.")
+        st.dataframe(summary, use_container_width=True, hide_index=True)
+        st.markdown(
+            """
+- **Sales.xlsx / Purchase.xlsx** — Purchase / Sales template. A bill is put
+  here only when the template can reproduce it exactly. Sales and purchases
+  are separate files because each needs its own ledger names on the
+  `MASTER_LEDGER_NAME_LINK` sheet, which is already filled in with Marg's
+  ledgers.
+- **Pay_Con_Rec.xlsx** — Payment / Contra / Receipt template.
+- **Other_Vouchers.xlsx** — everything else (journals, credit notes, returns,
+  and bills the Purchase / Sales template can't hold), as plain Dr/Cr rows in
+  the Payment / Contra / Receipt layout. Every ledger and amount is kept as
+  Marg posted it; a voucher with several lines becomes several rows.
+"""
+        )
+        st.caption(
+            "The templates carry ledger amounts only, so stock items, "
+            "quantities and batches are not converted. The Purchase / Sales "
+            "template works tax out again from the taxable value, so a tax "
+            "ledger can differ from Marg by a few paise per bill, with the "
+            "difference going to ROUND OFF. Sale Return and Purchase Return "
+            "are Marg voucher types: they must exist in Tally before "
+            "Other_Vouchers is imported.")
+
+        review = converted["review"]
+        tabs = st.tabs(["Sales", "Purchase", "Pay / Con / Rec",
+                        "Other vouchers", f"Moved or split ({len(review)})"])
+        for tab, key in zip(tabs, ("sales", "purchase", "pcr", "other",
+                                   "review")):
+            tab.dataframe(converted[key], use_container_width=True,
+                          hide_index=True)
+        tabs[4].caption(
+            "Vouchers that were not placed in their usual template, or were "
+            "split into several rows, and why. The same list is on the "
+            "REVIEW sheet of Pay_Con_Rec.xlsx and Other_Vouchers.xlsx.")
+
+        marg_workbook_downloads(books, "Marg_Vouchers.zip", "marg_voucher_dl")
+        st.caption(
+            "Upload Sales.xlsx and Purchase.xlsx in **Purchase / Sales**, and "
+            "the other two in **Payment / Contra / Receipt**, under **Tally "
+            "Functionality**, to get the Tally XML.")
+
+    marg_tally_export_footer()
+    st.stop()
+
+
+# ==========================================================================
+# Marg ERP 9+ ledger export (.dbf)  ->  Master — Ledger Excel / Tally XML.
+# ==========================================================================
+@st.cache_data(show_spinner=False)
+def marg_read_ledgers(file_bytes):
+    """Parse the Marg ledger DBF (cached per uploaded file)."""
+    return marg_dbf.read_ledger_dbf(file_bytes)
+
+
+if tool_name == MARG_LEDGER_TOOL:
+    st.title(MARG_LEDGER_TOOL)
+    st.info(
+        "Upload the ledger master exported from **Marg ERP 9+** as a `.dbf` "
+        "file. Each ledger is converted into the **Master — Ledger** format, "
+        "ready to download as Excel or as Tally XML."
+    )
+
+    st.subheader("Step 1 — Export the ledgers from Marg as a DBF")
+    st.markdown(
+        """
+1. In Marg ERP 9+, go to **Masters > Ledger Master > Ledger Export**.
+   (The same option is also under **Reports > Management Report > Utilities
+   > Data Import/Export > Ledger Export**.)
+2. Select the ledgers to export — select all of them for a full migration.
+3. The export window shows the **folder path** where the file will be
+   saved (by default, your Marg folder). Note it, then confirm the export.
+4. Open that folder and pick up the exported **`.dbf`** file.
+
+If the option is greyed out or says you are not authorised, switch on
+export rights first: **Masters > Marg Setups > Control Room**, search
+**Export Import**, set it to **Both** / **Y**, then log in again.
+"""
+    )
+
+    st.divider()
+    st.subheader("Step 2 — Upload the Marg ledger DBF")
+    dbf_file = st.file_uploader(
+        "Upload the Marg ledger export (.dbf)", type=["dbf"],
+        key="uploader_marg_ledger_dbf")
+
+    if dbf_file is None:
+        st.stop()
+
+    dbf_bytes = dbf_file.getvalue()
+    try:
+        marg_records = marg_read_ledgers(dbf_bytes)
+    except marg_dbf.MargDbfError as exc:
+        st.error(str(exc))
+        st.stop()
+    st.success(f"Read {len(marg_records)} ledger(s) from Marg.")
+
+    st.divider()
+    st.subheader("Step 3 — Map Marg groups to Tally groups")
+    st.caption(
+        "Marg stores a group **code** on each ledger, not a group name. The "
+        "Tally groups below are suggestions worked out from the ledgers under "
+        "each code — check them, change any that are wrong, and untick the "
+        "codes you don't want. Tax, purchase and sales ledgers are unticked "
+        "by default: create those with the **Master — Duties & Taxes** and "
+        "**Master — Purchase/Sales Ledgers** tools, which set the tax rates."
+    )
+    group_table = st.data_editor(
+        marg_dbf.group_summary(marg_records),
+        key=f"marg_groups_{file_signature(dbf_bytes)[:12]}",
+        hide_index=True, use_container_width=True,
+        disabled=["Marg_Code", "Ledgers", "Examples"],
+        column_config={
+            "Include": st.column_config.CheckboxColumn("Include", width="small"),
+            "Marg_Code": st.column_config.TextColumn("Marg code", width="small"),
+            "Ledgers": st.column_config.NumberColumn("Ledgers", width="small"),
+            "Tally_Group": st.column_config.SelectboxColumn(
+                "Tally group", options=marg_dbf.TALLY_GROUPS, width="medium"),
+            "Examples": st.column_config.TextColumn("Example ledgers"),
+        })
+    group_mapping = {
+        row["Marg_Code"]: (row["Tally_Group"] if isinstance(row["Tally_Group"], str)
+                           else "", bool(row["Include"]))
+        for _, row in group_table.iterrows()}
+    ungrouped = [code for code, (group, include) in group_mapping.items()
+                 if include and not group]
+    if ungrouped:
+        st.warning("Pick a Tally group for the ticked code(s) "
+                   + ", ".join(f"`{c}`" for c in ungrouped)
+                   + " — their ledgers are left out until you do.")
+
+    st.divider()
+    st.subheader("Step 4 — Options")
+    name_style = st.radio(
+        "Ledger name", ["Name + city", "Name only"], horizontal=True,
+        key="marg_name_style",
+        help="Marg adds the party's city to the end of its name. Keeping it "
+             "tells apart parties with the same name in different cities.")
+    state_choice = st.selectbox(
+        "State for customers/suppliers that have no GST number",
+        ["(leave blank)"] + marg_dbf.STATE_NAMES, key="marg_default_state",
+        help="For ledgers with a GST number the state is taken from its "
+             "first two digits.")
+
+    ledger_df, marg_notes = marg_dbf.convert_ledgers(
+        marg_records, group_mapping,
+        keep_city=name_style == "Name + city",
+        default_state="" if state_choice == "(leave blank)" else state_choice)
+
+    st.divider()
+    st.subheader("Step 5 — Review and download")
+    if ledger_df.empty:
+        st.error("No ledgers selected — tick at least one group in Step 3.")
+        st.stop()
+    st.success(f"{len(ledger_df)} of {len(marg_records)} ledger(s) converted "
+               f"({len(marg_records) - len(ledger_df)} left out by Step 3).")
+
+    marg_dupes = marg_dbf.duplicate_names(ledger_df)
+    if marg_dupes:
+        st.warning(
+            f"{len(marg_dupes)} ledger name(s) appear more than once. Tally "
+            "keeps one ledger per name, so rename or remove the extras in the "
+            "Excel before importing: " + ", ".join(f"**{n}**" for n in marg_dupes))
+    if marg_notes:
+        with st.expander(f"⚠️ {len(marg_notes)} GST number(s) need a look",
+                         expanded=True):
+            for note in marg_notes:
+                st.markdown("- " + note)
+
+    st.dataframe(ledger_df, use_container_width=True, hide_index=True)
+
+    marg_xlsx = ledgers_to_excel(ledger_df.to_dict("records"))
+    base_name = os.path.splitext(dbf_file.name)[0]
+    d1, d2 = st.columns(2)
+    d1.download_button(
+        "⬇️ Download Excel (Master — Ledger format)", data=marg_xlsx,
+        file_name=f"Master_Ledger_from_{base_name}.xlsx", mime=XLSX_MIME,
+        use_container_width=True)
+    try:
+        marg_xml = tally_core.result_xml_bytes(
+            tally_core.convert_master_ledger(io.BytesIO(marg_xlsx)))
+        d2.download_button(
+            "⬇️ Download Tally XML", data=marg_xml,
+            file_name=f"Master_Ledger_from_{base_name}.xml",
+            mime="application/xml", use_container_width=True)
+    except Exception as exc:  # noqa: BLE001
+        d2.error(f"Could not build the Tally XML: {exc}")
+    st.caption(
+        "To run the duplicate-GST and Tally ledger checks first, download the "
+        "Excel and upload it in **Tally Functionality → Master — Ledger**.")
+
+    st.stop()
 
 # ==========================================================================
 # Bank / loan statement PDF  ->  Payment/Contra/Receipt template (LLM).

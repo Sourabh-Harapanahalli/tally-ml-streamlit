@@ -47,6 +47,20 @@ There are also a few extra tools:
 
 - **Master XML → Excel (reverse)** — turn a Tally "All Masters" XML export back
   into the Master — Ledger Excel format.
+- **MARG Ledger DBF → Master — Ledger** — upload the ledger master exported
+  from Marg ERP 9+ (`.dbf`) and get it in the Master — Ledger Excel format or
+  as Tally XML. Marg's group codes are mapped to Tally groups in an editable
+  table (the defaults are inferred, so review them). Logic lives in
+  `marg_dbf.py`.
+- **MARG Master / MARG Voucher (Tally Export)** — step-by-step instructions
+  for Marg ERP 9+'s built-in Tally Export, plus an upload that turns the
+  masters and daybook XML it writes into this app's Excel templates. Vouchers
+  the Purchase / Sales template can't reproduce exactly are written as Dr/Cr
+  rows and listed on a REVIEW sheet. Logic lives in `marg_xml.py`.
+- **Tally Error Log Viewer** — reads Tally's import log (`tally.imp`, by
+  default `C:\Program Files\Tally\Tally.ERP9\tally.imp`, or an uploaded copy)
+  and lists each import newest first with its errors and a plain-language
+  hint. Logic lives in `tally_log.py`.
 - **Consolidate Excel Files** — upload several workbooks; sheets with the same
   name are merged into one sheet. The header — single- or multi-row, detected
   as the top rows common to every file — is kept once and only the data rows
@@ -66,5 +80,8 @@ There are also a few extra tools:
 streamlit_tally/
 ├── app.py          <- Streamlit UI
 ├── tally_core.py   <- conversion engine (Excel <-> Tally XML)
+├── marg_dbf.py     <- Marg ERP ledger DBF reader / converter
+├── marg_xml.py     <- Marg Tally-export XML -> Excel templates
+├── tally_log.py    <- Tally import log (tally.imp) parser
 └── requirements.txt
 ```

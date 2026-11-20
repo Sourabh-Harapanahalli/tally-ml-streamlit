@@ -1508,6 +1508,22 @@ class Purchase_Sales:
             return {'xml_final': xml_final, 'data_csv': csv_string, 'file_name': 'Purchase_Sales'}
 
 
+def _pincode_text(value):
+    """Pincode as plain digits: 560039 / 560039.0 / "560039" -> "560039".
+
+    pandas yields numpy ints, which fail ``isinstance(v, int)``, so convert
+    via float instead of type-checking. Blank or non-numeric text is kept
+    as-is (stripped, XML-escaped).
+    """
+    s = str(value).strip()
+    if s in ('', 'nan', 'None'):
+        return ''
+    try:
+        return str(int(float(s)))
+    except ValueError:
+        return _xml_escape(s)
+
+
 class Master_Ledger:
     def post(self, uploaded_file):
 
@@ -1582,7 +1598,8 @@ class Master_Ledger:
                     <GUID>5146d6da-e8bc-454f-8fd1-116f5719b3cc-00000248</GUID>
                     <CURRENCYNAME>₹</CURRENCYNAME>
                     <PRIORSTATENAME>'''+str(data.iloc[row]['State_Name']).strip()+'''</PRIORSTATENAME>
-                    <PINCODE>'''+(str(int(data.iloc[row]['Pincode'])) if isinstance(data.iloc[row]['Pincode'], (int, float)) else '').strip()+'''</PINCODE>
+                    <PINCODE>'''+_pincode_text(data.iloc[row]['Pincode'])+'''</PINCODE>
+                    <INCOMETAXNUMBER>'''+str(data.iloc[row]['GST_NO']).strip()+'''</INCOMETAXNUMBER>
                     <COUNTRYNAME>'''+str(data.iloc[row]['Country']).strip()+'''</COUNTRYNAME>
                     <GSTREGISTRATIONTYPE>'''+str(data.iloc[row]['Reg_Type']).strip()+'''</GSTREGISTRATIONTYPE>
                     <VATDEALERTYPE>'''+str(data.iloc[row]['Reg_Type']).strip()+'''</VATDEALERTYPE>

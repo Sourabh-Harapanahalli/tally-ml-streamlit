@@ -1094,6 +1094,202 @@ def pcr_ledger_check_ui(file_bytes):
 
 
 # --------------------------------------------------------------------------
+# Master — Ledger: GST numbers that already exist in Tally under another name.
+#
+# Importing a ledger whose GSTIN is already on a differently-named Tally
+# ledger creates a second ledger for the same party. These helpers fetch the
+# Tally ledgers with their GSTIN (ODBC) and flag such rows so the user can
+# either rename the row to the existing Tally ledger (Fix) or keep it (Ignore).
+# --------------------------------------------------------------------------
+def _norm_gstin(value):
+    """Trim + uppercase a GSTIN; blanks and NaN become ''."""
+    s = str(value).strip().upper()
+    return "" if s in ("", "NAN", "NONE") else s
+
+
+def fetch_tally_ledger_gstins(conn_str):
+    """Return ``{GSTIN: [ledger names]}`` for Tally ledgers that have a GSTIN."""
+    df = run_odbc_query(conn_str, "SELECT $Name, $PartyGSTIN FROM Ledger")
+    by_gst = {}
+    for name, gst in df.itertuples(index=False, name=None):
+        name, gst = str(name or "").strip(), _norm_gstin(gst or "")
+        if name and gst:
+            by_gst.setdefault(gst, []).append(name)
+    return by_gst
+
+
+def find_gst_name_conflicts(file_bytes, tally_by_gst):
+    """Rows whose GST_NO exists in Tally only under a different ledger name.
+
+    A row is fine when any Tally ledger with that GSTIN has the same name
+    (case/whitespace-insensitive) — the import then just updates that ledger.
+    Returns a list of dicts: row_index, Row, Ledger_Name, GST_NO, tally_names.
+    """
+    df = pd.read_excel(io.BytesIO(file_bytes), sheet_name="TEMPLATE").fillna("")
+    if "GST_NO" not in df.columns or "Ledger_Name" not in df.columns:
+        return []
+    conflicts = []
+    for idx, row in df.iterrows():
+        gst = _norm_gstin(row["GST_NO"])
+        names = tally_by_gst.get(gst) if gst else None
+        if not names:
+            continue
+        name = str(row["Ledger_Name"]).strip()
+        if _norm_name(name) in {_norm_name(n) for n in names}:
+            continue
+        conflicts.append({"row_index": int(idx), "Row": int(idx) + 2,
+                          "Ledger_Name": name, "GST_NO": gst,
+                          "tally_names": sorted(names, key=str.lower)})
+    return conflicts
+
+
+def apply_row_ledger_names(file_bytes, renames):
+    """Return new .xlsx bytes with ``{row_index: name}`` written to Ledger_Name."""
+    wb = load_workbook(io.BytesIO(file_bytes))
+    ws = wb["TEMPLATE"]
+    headers = [c.value for c in ws[1]]
+    if "Ledger_Name" not in headers:
+        return file_bytes
+    ci = headers.index("Ledger_Name") + 1
+    for row_index, name in renames.items():
+        ws.cell(row=int(row_index) + 2, column=ci).value = name
+    out = io.BytesIO()
+    wb.save(out)
+    return out.getvalue()
+
+
+def ml_gst_check_ui(file_bytes, key_prefix="ml"):
+    """Step 2a for Master — Ledger: flag GSTINs already in Tally under another
+    ledger name, with Fix (use the Tally name) or Ignore per row.
+
+    Returns ``(convert_bytes, blocked)`` like :func:`ledger_check_ui`.
+    """
+    gst_key = f"{key_prefix}_tally_gst"
+    fix_key = f"{key_prefix}_corrections"  # {row_index: Tally ledger name}
+    st.subheader("Step 2a — Check GST numbers against Tally")
+    with st.expander("🔗 Find GST numbers already in Tally under a different "
+                     "ledger name", expanded=True):
+        st.caption(
+            "If a GST number in your file already belongs to a Tally ledger with "
+            "a **different name**, importing it creates a **duplicate ledger** "
+            "for the same party. Connect to a running Tally (ODBC, same machine) "
+            "to catch these before converting."
+        )
+        conn_str = odbc_connection_form(f"{key_prefix}_chk")
+        st.caption(f"Connection string: `{conn_str}`")
+
+        if st.button("🔍 Fetch ledgers & GST numbers from Tally & check",
+                     key=f"{key_prefix}_chk_fetch"):
+            try:
+                by_gst = fetch_tally_ledger_gstins(conn_str)
+                st.session_state[gst_key] = by_gst
+                st.session_state[fix_key] = {}
+                if not by_gst:
+                    st.warning("Connected, but no Tally ledger has a GST number.")
+            except ImportError:
+                st.error("`pyodbc` is not installed. Run `pip install pyodbc`.")
+            except Exception as exc:  # noqa: BLE001
+                st.session_state.pop(gst_key, None)
+                st.error(f"Could not fetch ledgers from Tally: {exc}")
+                st.caption(
+                    "Check that Tally is open with ODBC enabled and the port "
+                    "matches, and that the driver name / DSN and bitness are right."
+                )
+
+        by_gst = st.session_state.get(gst_key)
+        if by_gst is None:
+            skip = st.checkbox(
+                "Skip Tally check (convert without checking GST numbers)",
+                key=f"{key_prefix}_chk_skip")
+            if skip:
+                st.caption("⚠️ GST numbers will NOT be checked against Tally.")
+                return file_bytes, False
+            st.info("⏸️ Conversion is paused — fetch from Tally above to check, "
+                    "or tick “Skip Tally check”.")
+            return file_bytes, True
+
+        fixes = st.session_state.setdefault(fix_key, {})
+        conflicts = find_gst_name_conflicts(file_bytes, by_gst)
+        st.caption(f"Loaded **{sum(map(len, by_gst.values()))}** Tally ledger(s) "
+                   f"with a GST number · **{len(by_gst)}** distinct GSTIN(s).")
+
+        if not conflicts:
+            st.success("✅ No GST number in your file is already in Tally under "
+                       "a different ledger name.")
+            return file_bytes, False
+
+        def status(c):
+            if c["row_index"] in fixes:
+                return f"✅ Fixed → {fixes[c['row_index']]}"
+            if st.session_state.get(f"{key_prefix}_chk_ignore_{c['row_index']}"):
+                return "➖ Ignored (new ledger)"
+            return "❌ Needs action"
+
+        table = pd.DataFrame([{
+            "Row": c["Row"], "Status": status(c),
+            "Ledger_Name (file)": c["Ledger_Name"], "GST_NO": c["GST_NO"],
+            "Existing Tally ledger(s)": ", ".join(c["tally_names"]),
+            } for c in conflicts])
+        st.warning(
+            f"⚠️ **{len(conflicts)}** ledger(s) have a GST number that already "
+            "exists in Tally under a **different name**. **Fix** renames the row "
+            "to the existing Tally ledger (the import then updates it instead "
+            "of creating a duplicate). **Ignore** keeps your name and creates a "
+            "new ledger."
+        )
+        st.dataframe(
+            table.style.apply(
+                lambda r: ["background-color: #ffd6d6"] * len(r)
+                if r["Status"].startswith("❌") else [""] * len(r), axis=1),
+            use_container_width=True, hide_index=True)
+
+        open_rows = [c for c in conflicts if c["row_index"] not in fixes
+                     and not st.session_state.get(
+                         f"{key_prefix}_chk_ignore_{c['row_index']}")]
+        if open_rows and st.button(
+                f"✨ Fix all {len(open_rows)} — use the existing Tally names",
+                key=f"{key_prefix}_chk_fix_all", type="primary"):
+            for c in open_rows:
+                fixes[c["row_index"]] = c["tally_names"][0]
+            st.rerun()
+
+        for c in conflicts:
+            ri = c["row_index"]
+            c0, c1, c2, c3, c4 = st.columns([1, 3, 3, 1.5, 1.5],
+                                            vertical_alignment="center")
+            c0.markdown(f"Row **{c['Row']}**")
+            c1.markdown(f"`{c['Ledger_Name']}`  \n{c['GST_NO']}")
+            if ri in fixes:
+                c2.markdown(f"→ **{fixes[ri]}**")
+                if c3.button("Undo", key=f"{key_prefix}_chk_fix_{ri}"):
+                    fixes.pop(ri, None)
+                    st.rerun()
+                continue
+            ignored = c4.checkbox("Ignore", key=f"{key_prefix}_chk_ignore_{ri}")
+            if ignored:
+                c2.caption("Keeping the file's name — a new ledger will be created.")
+                continue
+            choice = c2.selectbox(
+                "Tally ledger", c["tally_names"],
+                key=f"{key_prefix}_chk_sugg_{ri}", label_visibility="collapsed")
+            if c3.button("Fix", key=f"{key_prefix}_chk_fix_{ri}"):
+                fixes[ri] = choice
+                st.rerun()
+
+        convert_bytes = (apply_row_ledger_names(file_bytes, fixes)
+                         if fixes else file_bytes)
+        remaining = [c for c in conflicts if c["row_index"] not in fixes
+                     and not st.session_state.get(
+                         f"{key_prefix}_chk_ignore_{c['row_index']}")]
+        if remaining:
+            st.info(f"⏸️ Conversion is paused — Fix or Ignore the "
+                    f"{len(remaining)} remaining row(s) above.")
+            return convert_bytes, True
+        st.success("✅ All GST conflicts resolved.")
+        return convert_bytes, False
+
+
+# --------------------------------------------------------------------------
 # Run / progress / restart helpers shared by the Tally tools.
 # --------------------------------------------------------------------------
 def run_with_progress(fn, *args, label="Running"):
@@ -1147,7 +1343,7 @@ def uploader_nonce(state_key):
 # Date-range settings and the Tally connection/ledger list are kept.
 _RESTART_STATE = ("_datecorr", "_date_all", "_dp_", "_corrections",
                   "_chk_skip", "_chk_search_", "_chk_sugg_", "_chk_fix_",
-                  "_chk_convert_anyway")
+                  "_chk_convert_anyway", "_chk_ignore_")
 
 
 def restart_tool(state_key, check_prefix=None):
@@ -2041,12 +2237,17 @@ if uploaded is not None:
         convert_bytes, ledger_blocked = pcr_ledger_check_ui(uploaded.getvalue())
         if ledger_blocked:
             st.stop()
+    elif tool_name == "Master — Ledger":
+        convert_bytes, gst_blocked = ml_gst_check_ui(uploaded.getvalue())
+        if gst_blocked:
+            st.stop()
 
     DATE_COLS = {
         "Purchase / Sales": ("Datetime", "Supplier_Invoice"),
         "Payment / Contra / Receipt": ("DATE_TIME", "PartyLedgerName"),
     }
-    KEY_PREFIX = {"Purchase / Sales": "ps", "Payment / Contra / Receipt": "pcr"}
+    KEY_PREFIX = {"Purchase / Sales": "ps", "Payment / Contra / Receipt": "pcr",
+                  "Master — Ledger": "ml"}
 
     # ---- Date-format sanity check: warn if Excel auto-converted dates -------
     if tool_name in DATE_COLS:

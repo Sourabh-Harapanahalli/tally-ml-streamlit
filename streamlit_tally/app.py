@@ -1143,8 +1143,9 @@ def find_gst_name_conflicts(file_bytes, tally_by_gst):
     return conflicts
 
 
-def apply_row_ledger_names(file_bytes, renames):
-    """Return new .xlsx bytes with ``{row_index: name}`` written to Ledger_Name."""
+def apply_row_ledger_names(file_bytes, renames, drop_rows=()):
+    """Return new .xlsx bytes with ``{row_index: name}`` written to Ledger_Name
+    and the ``drop_rows`` (row indexes) removed from the TEMPLATE sheet."""
     wb = load_workbook(io.BytesIO(file_bytes))
     ws = wb["TEMPLATE"]
     headers = [c.value for c in ws[1]]
@@ -1153,6 +1154,9 @@ def apply_row_ledger_names(file_bytes, renames):
     ci = headers.index("Ledger_Name") + 1
     for row_index, name in renames.items():
         ws.cell(row=int(row_index) + 2, column=ci).value = name
+    # Delete bottom-up so earlier row numbers don't shift.
+    for row_index in sorted({int(r) for r in drop_rows}, reverse=True):
+        ws.delete_rows(row_index + 2)
     out = io.BytesIO()
     wb.save(out)
     return out.getvalue()
@@ -1160,7 +1164,7 @@ def apply_row_ledger_names(file_bytes, renames):
 
 def ml_gst_check_ui(file_bytes, key_prefix="ml"):
     """Step 2a for Master — Ledger: flag GSTINs already in Tally under another
-    ledger name, with Fix (use the Tally name) or Ignore per row.
+    ledger name, with Fix (use the Tally name) or Ignore (drop the row) per row.
 
     Returns ``(convert_bytes, blocked)`` like :func:`ledger_check_ui`.
     """
@@ -1222,7 +1226,7 @@ def ml_gst_check_ui(file_bytes, key_prefix="ml"):
             if c["row_index"] in fixes:
                 return f"✅ Fixed → {fixes[c['row_index']]}"
             if st.session_state.get(f"{key_prefix}_chk_ignore_{c['row_index']}"):
-                return "➖ Ignored (new ledger)"
+                return "➖ Ignored (row removed)"
             return "❌ Needs action"
 
         table = pd.DataFrame([{
@@ -1234,8 +1238,8 @@ def ml_gst_check_ui(file_bytes, key_prefix="ml"):
             f"⚠️ **{len(conflicts)}** ledger(s) have a GST number that already "
             "exists in Tally under a **different name**. **Fix** renames the row "
             "to the existing Tally ledger (the import then updates it instead "
-            "of creating a duplicate). **Ignore** keeps your name and creates a "
-            "new ledger."
+            "of creating a duplicate). **Ignore** removes the row from the file, "
+            "so that ledger is not imported."
         )
         st.dataframe(
             table.style.apply(
@@ -1256,7 +1260,7 @@ def ml_gst_check_ui(file_bytes, key_prefix="ml"):
                     fixes[c["row_index"]] = c["tally_names"][0]
                 st.rerun()
             if b2.button(
-                    f"➖ Ignore all {len(open_rows)} — keep the file's names",
+                    f"➖ Ignore all {len(open_rows)} — remove these rows",
                     key=f"{key_prefix}_chk_ignore_all",
                     use_container_width=True):
                 # Set the per-row Ignore checkboxes before they render below.
@@ -1278,7 +1282,7 @@ def ml_gst_check_ui(file_bytes, key_prefix="ml"):
                 continue
             ignored = c4.checkbox("Ignore", key=f"{key_prefix}_chk_ignore_{ri}")
             if ignored:
-                c2.caption("Keeping the file's name — a new ledger will be created.")
+                c2.caption("This row will be removed — it won't be imported.")
                 continue
             choice = c2.selectbox(
                 "Tally ledger", c["tally_names"],
@@ -1287,16 +1291,25 @@ def ml_gst_check_ui(file_bytes, key_prefix="ml"):
                 fixes[ri] = choice
                 st.rerun()
 
-        convert_bytes = (apply_row_ledger_names(file_bytes, fixes)
-                         if fixes else file_bytes)
+        ignored = [c["row_index"] for c in conflicts
+                   if c["row_index"] not in fixes and st.session_state.get(
+                       f"{key_prefix}_chk_ignore_{c['row_index']}")]
+        convert_bytes = (apply_row_ledger_names(file_bytes, fixes, ignored)
+                         if fixes or ignored else file_bytes)
         remaining = [c for c in conflicts if c["row_index"] not in fixes
-                     and not st.session_state.get(
-                         f"{key_prefix}_chk_ignore_{c['row_index']}")]
+                     and c["row_index"] not in ignored]
         if remaining:
             st.info(f"⏸️ Conversion is paused — Fix or Ignore the "
                     f"{len(remaining)} remaining row(s) above.")
             return convert_bytes, True
-        st.success("✅ All GST conflicts resolved.")
+        left = pd.read_excel(io.BytesIO(convert_bytes), sheet_name="TEMPLATE")
+        if left.dropna(how="all").empty:
+            st.warning("Every row has been ignored — there is nothing left to "
+                       "convert. Untick Ignore on a row or Restart.")
+            return convert_bytes, True
+        st.success("✅ All GST conflicts resolved."
+                   + (f" **{len(ignored)}** ignored row(s) will be removed "
+                      "before converting." if ignored else ""))
         return convert_bytes, False
 
 

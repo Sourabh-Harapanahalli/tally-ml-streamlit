@@ -1,6 +1,8 @@
 # Loosened pins so prebuilt wheels are used (no source builds) across
 # Python 3.11 / 3.12 / 3.13. Keep pandas < 3 to preserve current behavior.
-streamlit>=1.39,<2
+# The interface styling in ui.py is checked against Streamlit 1.39 and 1.67.
+# Raise the upper bound only after checking the pages on the newer version.
+streamlit>=1.39,<1.68
 pandas>=2.2,<3
 numpy>=1.26,<3
 openpyxl>=3.1

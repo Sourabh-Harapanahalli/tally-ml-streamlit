@@ -74,11 +74,25 @@ There are also a few extra tools:
 - **Tally ODBC — Live Data** — query a running Tally instance over its ODBC
   server (needs the Tally ODBC driver; install `pyodbc` and run next to Tally).
 
+## Look and feel
+
+The interface is styled in [`ui.py`](ui.py): the style sheet, the sidebar
+menu, the Home screen with searchable tool cards, page headers, numbered step
+headings and the Excel-style file preview. Base colours are in
+`.streamlit/config.toml`. `app.py` keeps the per-tool logic.
+
+- Each tool has an icon and a one-line description in `TOOL_META` in `app.py`;
+  add an entry there when adding a tool.
+- A tool can be opened directly with `?tool=<name>`, for example
+  `http://localhost:8501/?tool=master-ledger`.
+- After editing `ui.py`, restart the app — Streamlit does not always reload it.
+
 ## Layout
 
 ```
 streamlit_tally/
 ├── app.py          <- Streamlit UI
+├── ui.py           <- look and feel: styles, navigation, Home, previews
 ├── tally_core.py   <- conversion engine (Excel <-> Tally XML)
 ├── marg_dbf.py     <- Marg ERP ledger DBF reader / converter
 ├── marg_xml.py     <- Marg Tally-export XML -> Excel templates

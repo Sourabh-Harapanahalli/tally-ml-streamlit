@@ -33,6 +33,7 @@ import gstr1_json
 import marg_dbf
 import marg_xml
 import tally_log
+import ui
 
 # Load OPENAI_API_KEY (and any other vars) from a .env file if present.
 try:
@@ -42,7 +43,9 @@ except ImportError:
     pass
 
 # Must be the first Streamlit command in the script.
-st.set_page_config(page_title="TALLY ML", page_icon="📒", layout="centered")
+st.set_page_config(page_title="TALLY ML", page_icon="📒", layout="wide",
+                   initial_sidebar_state="expanded")
+ui.inject_style()
 
 # --------------------------------------------------------------------------
 # Tool catalogue — maps each converter to its upload key, conversion function
@@ -802,7 +805,7 @@ def date_resolver_ui(file_bytes, date_col, id_col, key_prefix):
     corrections = st.session_state.setdefault(corr_key, {})
     n_sugg = sum(1 for r in rows if r["suggestion"] is not None)
 
-    st.subheader("Step 2b — Fix unreadable dates")
+    ui.step("Step 2b — Fix unreadable dates")
     st.warning(
         f"⚠️ **{len(rows)}** date(s) can't be read as DD/MM/YYYY. Confirm the "
         f"suggested fix or pick a date from the calendar. **Conversion is "
@@ -921,7 +924,7 @@ def date_range_ui(key_prefix):
     its own state. Returns ``(enabled, date_from, date_to)``; when enabled,
     every voucher's date must fall within the range or conversion is blocked.
     """
-    st.subheader("Step 1b — Voucher date range (optional)")
+    ui.step("Step 1b — Voucher date range (optional)")
     enabled = st.checkbox(
         "Restrict voucher dates to a range (your Tally data period)",
         key=f"{key_prefix}_date_enable",
@@ -958,7 +961,7 @@ def ledger_check_ui(file_bytes, columns, key_prefix, columns_label):
     convert_bytes = file_bytes
     ledgers_key = f"{key_prefix}_tally_ledgers"
     corr_key = f"{key_prefix}_corrections"
-    st.subheader("Step 2a — Verify ledger names against Tally")
+    ui.step("Step 2a — Verify ledger names against Tally")
     with st.expander(f"🔗 Check {columns_label} against your Tally company",
                      expanded=True):
         st.caption(
@@ -1188,7 +1191,7 @@ def ml_gst_check_ui(file_bytes, key_prefix="ml", drop_rows=()):
 
     gst_key = f"{key_prefix}_tally_gst"
     fix_key = f"{key_prefix}_corrections"  # {row_index: Tally ledger name}
-    st.subheader("Step 2a — Check GST numbers against Tally")
+    ui.step("Step 2a — Check GST numbers against Tally")
     with st.expander("🔗 Find GST numbers already in Tally under a different "
                      "ledger name", expanded=True):
         st.caption(
@@ -1407,11 +1410,7 @@ def restart_button(state_key, check_prefix=None):
 # --------------------------------------------------------------------------
 # UI
 # --------------------------------------------------------------------------
-st.sidebar.title("📒 TALLY ML")
-st.sidebar.caption("Excel → Tally XML converter")
-
-# Sidebar sections. Each is its own radio, but together they act as a single
-# choice: picking an option in one section clears the others.
+# Sidebar sections, in the order they appear in the menu and on Home.
 TOOL_SECTIONS = {
     "Tally Functionality": list(TOOLS.keys()) + [BANK_PDF_TOOL,
                                                 ERROR_LOG_TOOL],
@@ -1420,34 +1419,104 @@ TOOL_SECTIONS = {
                                 MARG_LEDGER_TOOL],
     "Excel Functionality": [CONSOLIDATE_TOOL, GSTR1_JSON_TOOL, COMPARE_TOOL],
 }
+SECTION_NOTES = {
+    "Tally Functionality":
+        "Turn your Excel sheets and statements into files Tally can import.",
+    "Tally Reverse Functionality":
+        "Bring data out of Tally and back into Excel.",
+    "MARG to Tally Converter":
+        "Move a company's books from Marg ERP 9+ into Tally.",
+    "Excel Functionality":
+        "Everyday helpers for Excel and GST files.",
+}
+# Per tool: icon, short menu label, a plain-language line saying what it is
+# for, and extra search words for the Home screen.
+TOOL_META = {
+    "Purchase / Sales": {
+        "icon": "🧾", "nav": "Purchase / Sales",
+        "desc": "Turn purchase and sales bills in Excel into Tally vouchers, "
+                "with GST worked out for you.",
+        "tags": "invoice bill voucher gst cgst sgst igst xml"},
+    "Payment / Contra / Receipt": {
+        "icon": "💸", "nav": "Payment / Contra / Receipt",
+        "desc": "Turn payments, receipts and bank transfers in Excel into "
+                "Tally vouchers.",
+        "tags": "voucher bank cash xml"},
+    "Master — Ledger": {
+        "icon": "📇", "nav": "Master — Ledger",
+        "desc": "Create customers, suppliers and other ledgers in Tally from "
+                "an Excel list.",
+        "tags": "party customer supplier gstin opening balance group xml"},
+    "Master — Duties & Taxes": {
+        "icon": "🏛️", "nav": "Master — Duties & Taxes",
+        "desc": "Create GST tax ledgers (CGST, SGST, IGST) in Tally.",
+        "tags": "gst tax ledger xml"},
+    "Master — Purchase/Sales Ledgers": {
+        "icon": "🏷️", "nav": "Master — Purchase/Sales Ledgers",
+        "desc": "Create purchase and sales ledgers with their GST rates.",
+        "tags": "gst rate ledger xml"},
+    BANK_PDF_TOOL: {
+        "icon": "🏦", "nav": "Bank Statement PDF",
+        "desc": "Read a bank or loan statement PDF and turn it into payment "
+                "and receipt entries.",
+        "tags": "bank loan statement pdf ai payment receipt"},
+    ERROR_LOG_TOOL: {
+        "icon": "🩺", "nav": "Tally Error Log Viewer",
+        "desc": "See why a Tally import failed, explained in plain language.",
+        "tags": "tally.imp import error log failed"},
+    MASTER_XML_TOOL: {
+        "icon": "↩️", "nav": "Master XML → Excel",
+        "desc": "Turn a masters export from Tally back into an Excel list of "
+                "ledgers.",
+        "tags": "tally export xml excel ledger reverse"},
+    ODBC_TOOL: {
+        "icon": "🔌", "nav": "Tally ODBC — Live Data",
+        "desc": "Look at live data from a Tally company that is open on this "
+                "computer.",
+        "tags": "odbc live sql ledger connect"},
+    MARG_MASTER_TOOL: {
+        "icon": "📦", "nav": "MARG Master",
+        "desc": "Move ledgers and other masters from Marg into Tally, or "
+                "into Excel.",
+        "tags": "marg erp master ledger xml export"},
+    MARG_VOUCHER_TOOL: {
+        "icon": "📑", "nav": "MARG Voucher",
+        "desc": "Move sales, purchases, payments and receipts from Marg into "
+                "Tally, or into Excel.",
+        "tags": "marg erp daybook voucher xml export"},
+    MARG_LEDGER_TOOL: {
+        "icon": "🗂️", "nav": "MARG Ledger DBF",
+        "desc": "Convert Marg's ledger export (.dbf) into the Master — "
+                "Ledger Excel format.",
+        "tags": "marg erp dbf ledger master"},
+    CONSOLIDATE_TOOL: {
+        "icon": "🧩", "nav": "Consolidate Excel Files",
+        "desc": "Merge several Excel files into one, sheet by sheet.",
+        "tags": "merge combine workbook excel"},
+    GSTR1_JSON_TOOL: {
+        "icon": "📊", "nav": "GSTR-1 JSON → Excel",
+        "desc": "Convert a GSTR-1 JSON file from the GST portal into Excel.",
+        "tags": "gst gstr1 json b2b hsn portal"},
+    COMPARE_TOOL: {
+        "icon": "🔍", "nav": "Find Missing Values",
+        "desc": "Find values that are in one Excel file but missing from "
+                "another.",
+        "tags": "compare excel missing difference"},
+}
+ALL_TOOLS = [t for tools in TOOL_SECTIONS.values() for t in tools]
+SECTION_OF = {t: s for s, tools in TOOL_SECTIONS.items() for t in tools}
 
-
-def _select_tool(section_key):
-    """Make the clicked section's radio the active choice; clear the rest."""
-    choice = st.session_state.get(section_key)
-    if choice is None:
-        return
-    st.session_state["active_tool"] = choice
-    for i in range(len(TOOL_SECTIONS)):
-        other = f"nav_section_{i}"
-        if other != section_key:
-            st.session_state[other] = None
-
-
+# The active page is kept in session state; ?tool=… in the URL opens a tool
+# directly, so a page can be bookmarked or shared.
 if "active_tool" not in st.session_state:
-    st.session_state["active_tool"] = next(iter(TOOL_SECTIONS.values()))[0]
-
-for i, (section, options) in enumerate(TOOL_SECTIONS.items()):
-    key = f"nav_section_{i}"
-    if key not in st.session_state:
-        active = st.session_state["active_tool"]
-        st.session_state[key] = active if active in options else None
-    with st.sidebar.expander(
-            section, expanded=st.session_state["active_tool"] in options):
-        st.radio(section, options, key=key, label_visibility="collapsed",
-                 on_change=_select_tool, args=(key,))
+    st.session_state["active_tool"] = ui.initial_tool(ALL_TOOLS)
 
 tool_name = st.session_state["active_tool"]
+ui.sidebar_nav(TOOL_SECTIONS, TOOL_META, tool_name)
+
+if tool_name == ui.HOME:
+    ui.home(TOOL_SECTIONS, TOOL_META, SECTION_NOTES)
+    st.stop()
 
 # ==========================================================================
 # Tally error log viewer: reads tally.imp, the log Tally appends to on every
@@ -1459,7 +1528,7 @@ def parse_tally_log(raw_bytes):
 
 
 if tool_name == ERROR_LOG_TOOL:
-    st.title(ERROR_LOG_TOOL)
+    ui.page_header(ERROR_LOG_TOOL, TOOL_META, SECTION_OF.get(ERROR_LOG_TOOL, ""))
     st.info(
         "Shows what happened on each Tally import, newest first. Tally "
         "writes this log to `tally.imp` in its program folder every time "
@@ -1511,7 +1580,7 @@ if tool_name == ERROR_LOG_TOOL:
     m1.metric("Imports", len(log_runs))
     m2.metric("With errors", len(failed_runs))
     m3.metric("Total errors", total_errors)
-    m4.metric("Latest import", log_runs[0]["when"].strftime("%d %b %Y")
+    m4.metric("Latest import", log_runs[0]["when"].strftime("%d %b %y")
               if log_runs[0]["when"] else log_runs[0]["when_text"])
 
     f1, f2 = st.columns([1, 2])
@@ -1546,12 +1615,12 @@ if tool_name == ERROR_LOG_TOOL:
     st.caption(f"Showing {len(shown_runs)} of {len(log_runs)} import(s), "
                "newest first.")
 
-    for run in shown_runs:
+    for card, run in enumerate(shown_runs):
         counts = run["counts"]
         n_errors = max(len(run["errors"]), counts["Errors"])
         when = (run["when"].strftime("%d %b %Y, %I:%M %p")
                 if run["when"] else run["when_text"])
-        with st.container(border=True):
+        with st.container(key=f"{'logerr' if n_errors else 'logok'}_{card}"):
             top, badge = st.columns([4, 1])
             top.markdown(f"**{run['file_name']}**  \n{when}")
             if n_errors:
@@ -1652,7 +1721,7 @@ def marg_tally_export_footer():
 
 
 if tool_name == MARG_MASTER_TOOL:
-    st.title(MARG_MASTER_TOOL)
+    ui.page_header(MARG_MASTER_TOOL, TOOL_META, SECTION_OF.get(MARG_MASTER_TOOL, ""))
     st.info(
         "Move your **masters** (ledgers, and stock items if you keep "
         "inventory) from Marg ERP 9+ into Tally using Marg's built-in "
@@ -1662,7 +1731,7 @@ if tool_name == MARG_MASTER_TOOL:
     marg_tally_export_prerequisites()
 
     st.divider()
-    st.subheader("Step 1 — Export the masters from Marg")
+    ui.step("Step 1 — Export the masters from Marg")
     st.markdown(
         f"""
 1. In Marg, go to {MARG_TALLY_EXPORT_PATH}.
@@ -1679,7 +1748,7 @@ if tool_name == MARG_MASTER_TOOL:
     )
 
     st.divider()
-    st.subheader("Step 2 — Import the masters into Tally.ERP 9")
+    ui.step("Step 2 — Import the masters into Tally.ERP 9")
     st.markdown(
         """
 1. Open the company (**Alt + F3** to create it, with the same financial year
@@ -1694,7 +1763,7 @@ if tool_name == MARG_MASTER_TOOL:
     )
 
     st.divider()
-    st.subheader("Step 3 — Or convert the masters file to Excel")
+    ui.step("Step 3 — Or convert the masters file to Excel")
     st.caption(
         "Instead of importing Marg's file straight into Tally, upload it "
         "here to get it in this app's **Master** templates, where you can "
@@ -1764,7 +1833,7 @@ if tool_name == MARG_MASTER_TOOL:
 
 
 if tool_name == MARG_VOUCHER_TOOL:
-    st.title(MARG_VOUCHER_TOOL)
+    ui.page_header(MARG_VOUCHER_TOOL, TOOL_META, SECTION_OF.get(MARG_VOUCHER_TOOL, ""))
     st.info(
         "Move your **vouchers** (the day book: sales, purchases, receipts, "
         "payments…) from Marg ERP 9+ into Tally using Marg's built-in "
@@ -1774,7 +1843,7 @@ if tool_name == MARG_VOUCHER_TOOL:
     marg_tally_export_prerequisites()
 
     st.divider()
-    st.subheader("Step 1 — Export the vouchers from Marg")
+    ui.step("Step 1 — Export the vouchers from Marg")
     st.markdown(
         f"""
 1. In Marg, go to {MARG_TALLY_EXPORT_PATH}.
@@ -1797,7 +1866,7 @@ if tool_name == MARG_VOUCHER_TOOL:
     )
 
     st.divider()
-    st.subheader("Step 2 — Import the vouchers into Tally.ERP 9")
+    ui.step("Step 2 — Import the vouchers into Tally.ERP 9")
     st.markdown(
         """
 1. Open the company and make sure the masters are already imported.
@@ -1810,7 +1879,7 @@ if tool_name == MARG_VOUCHER_TOOL:
     )
 
     st.divider()
-    st.subheader("Step 3 — Check the totals")
+    ui.step("Step 3 — Check the totals")
     st.markdown(
         """
 Compare **Profit & Loss** in Tally with Marg — the purchase and sale totals
@@ -1828,7 +1897,7 @@ should match.
     )
 
     st.divider()
-    st.subheader("Step 4 — Or convert the daybook file to Excel")
+    ui.step("Step 4 — Or convert the daybook file to Excel")
     st.caption(
         "Instead of importing Marg's file straight into Tally, upload it "
         "here to get the vouchers in this app's **Purchase / Sales** and "
@@ -1903,14 +1972,14 @@ def marg_read_ledgers(file_bytes):
 
 
 if tool_name == MARG_LEDGER_TOOL:
-    st.title(MARG_LEDGER_TOOL)
+    ui.page_header(MARG_LEDGER_TOOL, TOOL_META, SECTION_OF.get(MARG_LEDGER_TOOL, ""))
     st.info(
         "Upload the ledger master exported from **Marg ERP 9+** as a `.dbf` "
         "file. Each ledger is converted into the **Master — Ledger** format, "
         "ready to download as Excel or as Tally XML."
     )
 
-    st.subheader("Step 1 — Export the ledgers from Marg as a DBF")
+    ui.step("Step 1 — Export the ledgers from Marg as a DBF")
     st.markdown(
         """
 1. In Marg ERP 9+, go to **Masters > Ledger Master > Ledger Export**.
@@ -1928,7 +1997,7 @@ export rights first: **Masters > Marg Setups > Control Room**, search
     )
 
     st.divider()
-    st.subheader("Step 2 — Upload the Marg ledger DBF")
+    ui.step("Step 2 — Upload the Marg ledger DBF")
     dbf_file = st.file_uploader(
         "Upload the Marg ledger export (.dbf)", type=["dbf"],
         key="uploader_marg_ledger_dbf")
@@ -1945,7 +2014,7 @@ export rights first: **Masters > Marg Setups > Control Room**, search
     st.success(f"Read {len(marg_records)} ledger(s) from Marg.")
 
     st.divider()
-    st.subheader("Step 3 — Map Marg groups to Tally groups")
+    ui.step("Step 3 — Map Marg groups to Tally groups")
     st.caption(
         "Marg stores a group **code** on each ledger, not a group name. The "
         "Tally groups below are suggestions worked out from the ledgers under "
@@ -1979,7 +2048,7 @@ export rights first: **Masters > Marg Setups > Control Room**, search
                    + " — their ledgers are left out until you do.")
 
     st.divider()
-    st.subheader("Step 4 — Options")
+    ui.step("Step 4 — Options")
     name_style = st.radio(
         "Ledger name", ["Name + city", "Name only"], horizontal=True,
         key="marg_name_style",
@@ -1997,7 +2066,7 @@ export rights first: **Masters > Marg Setups > Control Room**, search
         default_state="" if state_choice == "(leave blank)" else state_choice)
 
     st.divider()
-    st.subheader("Step 5 — Review and download")
+    ui.step("Step 5 — Review and download")
     if ledger_df.empty:
         st.error("No ledgers selected — tick at least one group in Step 3.")
         st.stop()
@@ -2044,7 +2113,7 @@ export rights first: **Masters > Marg Setups > Control Room**, search
 # Bank / loan statement PDF  ->  Payment/Contra/Receipt template (LLM).
 # ==========================================================================
 if tool_name == BANK_PDF_TOOL:
-    st.title(BANK_PDF_TOOL)
+    ui.page_header(BANK_PDF_TOOL, TOOL_META, SECTION_OF.get(BANK_PDF_TOOL, ""))
     st.info(
         "Upload a **bank or loan statement PDF**. Every page is rendered to an "
         "image and read by a vision model, which formats each transaction into "
@@ -2163,7 +2232,7 @@ if tool_name == BANK_PDF_TOOL:
 # Consolidate Excel files: same-named sheets are merged into one.
 # ==========================================================================
 if tool_name == CONSOLIDATE_TOOL:
-    st.title(CONSOLIDATE_TOOL)
+    ui.page_header(CONSOLIDATE_TOOL, TOOL_META, SECTION_OF.get(CONSOLIDATE_TOOL, ""))
     st.info(
         "Upload **two or more Excel files**. Sheets with the **same name** are "
         "merged automatically into one sheet — the header is kept **once** "
@@ -2275,7 +2344,7 @@ if tool_name == CONSOLIDATE_TOOL:
 # GSTR-1 JSON  ->  Excel (B2B / CDNR / B2CS / NIL / HSN / ALL).
 # ==========================================================================
 if tool_name == GSTR1_JSON_TOOL:
-    st.title(GSTR1_JSON_TOOL)
+    ui.page_header(GSTR1_JSON_TOOL, TOOL_META, SECTION_OF.get(GSTR1_JSON_TOOL, ""))
     st.info(
         "Upload one or more **GSTR-1 JSON** files downloaded from the GST "
         "portal, then choose what to export: **B2B, CDNR, B2CS, NIL, HSN** or "
@@ -2381,7 +2450,7 @@ if tool_name == GSTR1_JSON_TOOL:
 # Find missing values: one column of Excel A against one column of Excel B.
 # ==========================================================================
 if tool_name == COMPARE_TOOL:
-    st.title(COMPARE_TOOL)
+    ui.page_header(COMPARE_TOOL, TOOL_META, SECTION_OF.get(COMPARE_TOOL, ""))
     st.info(
         "Give two lists, **A** and **B** — for each one either upload an "
         "Excel file and **click one column heading in its preview**, or "
@@ -2494,7 +2563,7 @@ if tool_name == COMPARE_TOOL:
 # Live tool: browse a running Tally instance over ODBC.
 # ==========================================================================
 if tool_name == ODBC_TOOL:
-    st.title(ODBC_TOOL)
+    ui.page_header(ODBC_TOOL, TOOL_META, SECTION_OF.get(ODBC_TOOL, ""))
     st.info(
         "Connect to a **running Tally** instance over its ODBC server and view "
         "the data live in this dashboard. This works only when the app runs on "
@@ -2516,7 +2585,7 @@ ODBC drivers* below to find the exact name.
 """
         )
 
-    st.subheader("Step 1 — Connect")
+    ui.step("Step 1 — Connect")
     col_a, col_b = st.columns(2)
     host = col_a.text_input("Host", value="localhost", key="tally_host")
     port = col_b.number_input("Port", value=9000, step=1, key="tally_port")
@@ -2573,7 +2642,7 @@ ODBC drivers* below to find the exact name.
     st.divider()
 
     # ---- Browse data ----------------------------------------------------
-    st.subheader("Step 2 — Browse data")
+    ui.step("Step 2 — Browse data")
     preset = st.selectbox("Pick a collection", list(ODBC_PRESETS.keys()))
 
     # Table name = the word after FROM in the preset SQL (Ledger, Group, …).
@@ -2627,7 +2696,7 @@ ODBC drivers* below to find the exact name.
 # Reverse tool: Tally Master XML  ->  Master-Ledger Excel.
 # ==========================================================================
 if tool_name == MASTER_XML_TOOL:
-    st.title(MASTER_XML_TOOL)
+    ui.page_header(MASTER_XML_TOOL, TOOL_META, SECTION_OF.get(MASTER_XML_TOOL, ""))
     st.info(
         "Upload a Tally **All Masters** XML export (e.g. `Master.xml`). Each "
         "ledger is extracted into the **Master — Ledger** Excel format "
@@ -2635,7 +2704,7 @@ if tool_name == MASTER_XML_TOOL:
         "Registration_Type, GST_NO, Opening_Balance, Dr/Cr, Address)."
     )
 
-    st.subheader("Step 1 — Export your masters from Tally as XML")
+    ui.step("Step 1 — Export your masters from Tally as XML")
     st.markdown(
         """
 1. In Tally, navigate to **Display**.
@@ -2650,7 +2719,7 @@ if tool_name == MASTER_XML_TOOL:
 
     st.divider()
 
-    st.subheader("Step 2 — Upload your Tally Master XML")
+    ui.step("Step 2 — Upload your Tally Master XML")
     xml_file = st.file_uploader(
         "Upload the Tally All-Masters XML export",
         type=["xml"],
@@ -2687,11 +2756,11 @@ if tool_name == MASTER_XML_TOOL:
 
 tool = TOOLS[tool_name]
 
-st.title(tool_name)
+ui.page_header(tool_name, TOOL_META, SECTION_OF.get(tool_name, ""))
 st.info(tool["help"])
 
 # ---- Step 1: download the blank template -------------------------------
-st.subheader("Step 1 — Download the blank template")
+ui.step("Step 1 — Download the blank template")
 try:
     template_bytes = build_template(tool_name)
     st.download_button(
@@ -2733,7 +2802,7 @@ elif tool_name == "Payment / Contra / Receipt":
 st.divider()
 
 # ---- Step 2: upload the filled template and convert --------------------
-st.subheader("Step 2 — Upload your filled template")
+ui.step("Step 2 — Upload your filled template")
 uploaded = st.file_uploader(
     "Upload the completed Excel file",
     type=["xlsx", "xls"],
@@ -2741,6 +2810,9 @@ uploaded = st.file_uploader(
 )
 
 if uploaded is not None:
+    with st.expander("👀  Preview your file", expanded=False):
+        ui.excel_preview(uploaded.getvalue(), uploaded.name,
+                         key=f"up_{tool['upload_key']}")
     block_conversion = False
 
     # ---- Wrong template / required sheets: fail early with a clear message --
@@ -2964,7 +3036,7 @@ if uploaded is not None:
     # ---- Step 2c: Voucher date range check -----------------------------
     if date_enabled and tool_name in DATE_COLS:
         date_col, id_col = DATE_COLS[tool_name]
-        st.subheader("Step 2c — Voucher date range check")
+        ui.step("Step 2c — Voucher date range check")
         if date_from and date_to and date_from <= date_to:
             try:
                 oor_df, unparsed_df = find_dates_out_of_range(
@@ -2997,7 +3069,7 @@ if uploaded is not None:
             st.warning("Set a valid From/To date range above to validate "
                        "voucher dates.")
 
-    st.subheader("Step 3 — Run")
+    ui.step("Step 3 — Run")
     state_key = tool["upload_key"]
     sig = file_signature(convert_bytes)
     stored = st.session_state.get(f"{state_key}_result")

@@ -1,0 +1,16 @@
+# Look and feel for TALLY ML. The detailed styling lives in ui.py; this sets
+# the base colours Streamlit's own widgets use so they match it.
+[theme]
+base = "light"
+primaryColor = "#6366f1"
+backgroundColor = "#f6f7fb"
+secondaryBackgroundColor = "#eef0ff"
+textColor = "#0f172a"
+font = "sans serif"
+
+[client]
+# Hide the developer menu and "Deploy" button from everyday users.
+toolbarMode = "minimal"
+
+[browser]
+gatherUsageStats = false

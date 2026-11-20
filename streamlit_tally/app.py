@@ -91,6 +91,33 @@ def build_template(tool_name):
     return TOOLS[tool_name]["template"]()
 
 
+def sheet_header_set(ws):
+    """Non-blank header names from the first row of a worksheet."""
+    row = next(ws.iter_rows(max_row=1, values_only=True), ())
+    return {str(v).strip() for v in row if v is not None and str(v).strip()}
+
+
+@st.cache_data(show_spinner=False)
+def template_headers(tool_name):
+    """Header names on the TEMPLATE sheet of a tool's blank template."""
+    wb = load_workbook(io.BytesIO(build_template(tool_name)), read_only=True)
+    return frozenset(sheet_header_set(wb["TEMPLATE"]))
+
+
+def template_coverage(tool_name, headers):
+    """Share of the tool's template columns present in ``headers`` (0–1)."""
+    expected = template_headers(tool_name)
+    return len(expected & headers) / len(expected) if expected else 0.0
+
+
+def detect_template_tool(headers):
+    """Return ``(tool_name, coverage)`` for the template that best matches
+    ``headers``, or None when nothing matches at all."""
+    best = max(((name, template_coverage(name, headers)) for name in TOOLS
+                if "template" in TOOLS[name]), key=lambda x: x[1], default=None)
+    return best if best and best[1] > 0 else None
+
+
 # --------------------------------------------------------------------------
 # Example data for each converter. These are sample rows that show the
 # expected format. EXAMPLES fills the TEMPLATE sheet; EXAMPLE_AUX fills the
@@ -1757,6 +1784,39 @@ uploaded = st.file_uploader(
 
 if uploaded is not None:
     block_conversion = False
+
+    # ---- Wrong template / required sheets: fail early with a clear message --
+    required_sheets = ["TEMPLATE"]
+    if tool_name == "Purchase / Sales":
+        required_sheets.append("MASTER_LEDGER_NAME_LINK")
+    try:
+        up_wb = load_workbook(io.BytesIO(uploaded.getvalue()), read_only=True)
+        sheet_names = up_wb.sheetnames
+        up_headers = (sheet_header_set(up_wb["TEMPLATE"])
+                      if "TEMPLATE" in sheet_names else set())
+    except Exception:  # noqa: BLE001
+        sheet_names = None  # let the converter report unreadable files
+    if sheet_names is not None:
+        match = detect_template_tool(up_headers)
+        own_cov = template_coverage(tool_name, up_headers)
+        if match and match[0] != tool_name and own_cov < 0.5 and match[1] > own_cov:
+            st.error(
+                f"🚫 **Wrong template.** This file looks like the "
+                f"**{match[0]}** template, not **{tool_name}**. Open "
+                f"**{match[0]}** from the sidebar and upload it there, or "
+                f"download the {tool_name} template in Step 1."
+            )
+            st.stop()
+        missing_sheets = [s for s in required_sheets if s not in sheet_names]
+        if missing_sheets:
+            st.error(
+                "🚫 This file is missing the sheet(s) "
+                + ", ".join(f"**{s}**" for s in missing_sheets)
+                + ". Sheets found: " + ", ".join(f"`{s}`" for s in sheet_names)
+                + ". Download the blank template in Step 1 (it includes every "
+                "required sheet), copy your data into it, and upload again."
+            )
+            st.stop()
 
     # ---- Validation (Master — Ledger) ----------------------------------
     if tool_name == "Master — Ledger":

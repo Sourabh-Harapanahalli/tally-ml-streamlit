@@ -1,4 +1,4 @@
-# TALLY ML — Streamlit
+# Tally AI — Streamlit
 
 A self-contained Streamlit app that converts Excel sheets to Tally XML (and
 browses a live Tally instance over ODBC).

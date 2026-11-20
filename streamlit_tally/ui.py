@@ -1,5 +1,5 @@
 """
-Look and feel for the TALLY ML app.
+Look and feel for the Tally AI app.
 
 Everything visual that is shared between pages lives here: the global style
 sheet, the sidebar navigation, the home screen with its tool cards, the page
@@ -96,6 +96,41 @@ h3 { font-weight: 700; }
   box-shadow: 0 6px 16px rgba(99, 102, 241, .35);
 }
 [data-testid="stSidebar"] [class*="st-key-navA_"] button * { color: #fff; font-weight: 600; }
+/* Section groups: highlighted, expandable headers */
+[data-testid="stSidebar"] [class*="st-key-navsec"] { margin-top: .35rem; }
+[data-testid="stSidebar"] [data-testid="stExpander"] details {
+  background: rgba(255, 255, 255, .045); border: 1px solid rgba(255, 255, 255, .09);
+  border-radius: 14px; box-shadow: none; overflow: hidden;
+  transition: background .2s ease, border-color .2s ease;
+}
+[data-testid="stSidebar"] [data-testid="stExpander"] details:hover { border-color: rgba(165, 180, 252, .45); }
+[data-testid="stSidebar"] [data-testid="stExpander"] summary {
+  padding: .62rem .75rem; border-radius: 13px; background: transparent;
+  transition: background .2s ease;
+}
+[data-testid="stSidebar"] [data-testid="stExpander"] summary:hover { background: rgba(255, 255, 255, .07); }
+[data-testid="stSidebar"] [data-testid="stExpander"] summary p {
+  font-size: .92rem; font-weight: 700; color: #f1f5f9; letter-spacing: -.005em;
+}
+[data-testid="stSidebar"] [data-testid="stExpander"] summary svg { color: #a5b4fc; fill: #a5b4fc; }
+[data-testid="stSidebar"] [data-testid="stExpander"] details[open] {
+  background: rgba(99, 102, 241, .10); border-color: rgba(129, 140, 248, .35);
+}
+[data-testid="stSidebar"] [data-testid="stExpander"] details[open] summary {
+  border-bottom: 1px solid rgba(255, 255, 255, .08); border-radius: 13px 13px 0 0;
+}
+[data-testid="stSidebar"] [class*="st-key-navsecA_"] [data-testid="stExpander"] details {
+  border-color: rgba(129, 140, 248, .75);
+  box-shadow: 0 0 0 1px rgba(129, 140, 248, .25), 0 10px 26px rgba(49, 46, 129, .45);
+}
+[data-testid="stSidebar"] [class*="st-key-navsecA_"] [data-testid="stExpander"] summary {
+  background: linear-gradient(90deg, rgba(99, 102, 241, .38), rgba(139, 92, 246, .22));
+}
+[data-testid="stSidebar"] [class*="st-key-navsecA_"] [data-testid="stExpander"] summary p { color: #fff; }
+[data-testid="stSidebar"] [data-testid="stExpander"] [data-testid="stExpanderDetails"] { padding: .45rem .4rem .75rem; }
+[data-testid="stSidebar"] [class*="st-key-navsec"] [data-testid="stVerticalBlock"],
+[data-testid="stSidebar"] [class*="st-key-navsec"] [data-testid="stElementContainer"] { width: 100% !important; max-width: 100%; }
+
 .tm-side-foot { font-size: .72rem; color: #64748b !important; padding: 1.6rem .55rem .5rem; line-height: 1.5; }
 
 /* ---- Buttons -------------------------------------------------------- */
@@ -376,23 +411,31 @@ def initial_tool(all_tools):
     return next((t for t in all_tools if slug(t) == wanted), HOME)
 
 
-def sidebar_nav(sections, meta, active):
-    """Brand block plus one button per tool, grouped by section."""
+def sidebar_nav(sections, meta, active, section_icons=None):
+    """Brand block plus one expandable group of tool buttons per section.
+
+    The section holding the open tool starts expanded and is highlighted;
+    the others start collapsed so the four section names stand out.
+    """
+    section_icons = section_icons or {}
     with st.sidebar:
         _html('<div class="tm-brand"><div class="tm-brand-mark">📒</div>'
-              '<div><div class="tm-brand-name">TALLY ML</div>'
+              '<div><div class="tm-brand-name">Tally AI</div>'
               '<div class="tm-brand-sub">Excel ⇄ Tally made simple</div></div></div>')
         st.button("🏠  Home", key="navA_home" if active == HOME else "nav_home",
                   on_click=go_to, args=(HOME,), use_container_width=True)
         for s, (section, tools) in enumerate(sections.items()):
-            _html(f'<div class="tm-nav-section">{html.escape(section)}</div>')
-            for t, tool in enumerate(tools):
-                info = meta.get(tool, {})
-                st.button(
-                    f"{info.get('icon', '•')}  {info.get('title', tool)}",
-                    key=f"{'navA' if tool == active else 'nav'}_{s}_{t}",
-                    on_click=go_to, args=(tool,), use_container_width=True,
-                    help=info.get("desc"))
+            here = active in tools
+            label = f"{section_icons.get(section, '📁')}  {section}"
+            with st.container(key=f"{'navsecA' if here else 'navsec'}_{s}"):
+                with st.expander(label, expanded=here):
+                    for t, tool in enumerate(tools):
+                        info = meta.get(tool, {})
+                        st.button(
+                            f"{info.get('icon', '•')}  {info.get('title', tool)}",
+                            key=f"{'navA' if tool == active else 'nav'}_{s}_{t}",
+                            on_click=go_to, args=(tool,),
+                            use_container_width=True, help=info.get("desc"))
         _html('<div class="tm-side-foot">Your files are processed on this '
               'computer and are not stored.</div>')
 
@@ -402,7 +445,7 @@ def sidebar_nav(sections, meta, active):
 # --------------------------------------------------------------------------
 def home(sections, meta, section_notes):
     """Hero, a three-step explainer and a searchable grid of tool cards."""
-    _html('<div class="tm-hero"><span class="tm-hero-tag">TALLY ML · Excel ⇄ Tally</span>'
+    _html('<div class="tm-hero"><span class="tm-hero-tag">Tally AI · Excel ⇄ Tally</span>'
           '<h1>What would you like to do today?</h1>'
           '<p>Pick a task below. Each one walks you through it step by step — '
           'upload your file, check it, and download the result.</p></div>')

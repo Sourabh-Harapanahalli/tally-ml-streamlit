@@ -1,6 +1,6 @@
 @echo off
 REM ==========================================================================
-REM Build / setup the TALLY ML Streamlit app on Windows.
+REM Build / setup the Tally AI Streamlit app on Windows.
 REM Always does a clean install: removes any existing .venv, recreates it,
 REM and installs dependencies from scratch.
 REM ==========================================================================

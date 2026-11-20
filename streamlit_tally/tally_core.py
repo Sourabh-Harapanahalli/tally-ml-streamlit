@@ -1,5 +1,5 @@
 """
-TALLY ML — self-contained conversion engine (no Django).
+Tally AI — self-contained conversion engine (no Django).
 
 This module holds all the Excel<->Tally-XML logic that previously lived in the
 Django app (GSTapp/views.py). It has no web framework dependency: each

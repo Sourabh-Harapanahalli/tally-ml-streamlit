@@ -1,5 +1,5 @@
 """
-TALLY ML — Streamlit app.
+Tally AI — Streamlit app.
 
 A self-contained Excel <-> Tally-XML converter. All processing logic lives in
 ``tally_core`` (pure pandas/openpyxl, no web framework); this module is the
@@ -43,7 +43,7 @@ except ImportError:
     pass
 
 # Must be the first Streamlit command in the script.
-st.set_page_config(page_title="TALLY ML", page_icon="📒", layout="wide",
+st.set_page_config(page_title="Tally AI", page_icon="📒", layout="wide",
                    initial_sidebar_state="expanded")
 ui.inject_style()
 
@@ -1429,6 +1429,12 @@ SECTION_NOTES = {
     "Excel & GST Tools":
         "Everyday helpers for Excel and GST files.",
 }
+SECTION_ICONS = {
+    "Excel to Tally": "📥",
+    "Tally to Excel": "📤",
+    "Marg to Tally": "🔁",
+    "Excel & GST Tools": "🧰",
+}
 # Per tool: icon, the plain-language name shown on screen, a line saying what
 # it is for, and extra search words for the Home screen. The dictionary keys
 # are the internal tool names used throughout this file.
@@ -1528,7 +1534,7 @@ if "active_tool" not in st.session_state:
     st.session_state["active_tool"] = ui.initial_tool(ALL_TOOLS)
 
 tool_name = st.session_state["active_tool"]
-ui.sidebar_nav(TOOL_SECTIONS, TOOL_META, tool_name)
+ui.sidebar_nav(TOOL_SECTIONS, TOOL_META, tool_name, SECTION_ICONS)
 
 if tool_name == ui.HOME:
     ui.home(TOOL_SECTIONS, TOOL_META, SECTION_NOTES)

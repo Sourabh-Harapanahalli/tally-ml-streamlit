@@ -1,4 +1,4 @@
-# Look and feel for TALLY ML. The detailed styling lives in ui.py; this sets
+# Look and feel for Tally AI. The detailed styling lives in ui.py; this sets
 # the base colours Streamlit's own widgets use so they match it.
 [theme]
 base = "light"

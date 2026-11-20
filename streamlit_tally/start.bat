@@ -1,6 +1,6 @@
 @echo off
 REM ==========================================================================
-REM Start the TALLY ML Streamlit app on Windows.
+REM Start the Tally AI Streamlit app on Windows.
 REM Run build.bat first to create the virtual environment.
 REM ==========================================================================
 
@@ -15,7 +15,7 @@ if not exist ".venv\Scripts\activate.bat" (
 
 call .venv\Scripts\activate.bat
 
-echo Starting TALLY ML... the app will open in your browser.
+echo Starting Tally AI... the app will open in your browser.
 streamlit run app.py
 
 pause

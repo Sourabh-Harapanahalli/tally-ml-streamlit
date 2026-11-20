@@ -1094,11 +1094,42 @@ def pcr_ledger_check_ui(file_bytes):
 # --------------------------------------------------------------------------
 st.sidebar.title("📒 TALLY ML")
 st.sidebar.caption("Excel → Tally XML converter")
-tool_name = st.sidebar.radio(
-    "Choose a converter",
-    list(TOOLS.keys()) + [BANK_PDF_TOOL, MASTER_XML_TOOL, CONSOLIDATE_TOOL, GSTR1_JSON_TOOL,
-                               COMPARE_TOOL,
-                               ODBC_TOOL])
+
+# Sidebar sections. Each is its own radio, but together they act as a single
+# choice: picking an option in one section clears the others.
+TOOL_SECTIONS = {
+    "Tally Functionality": list(TOOLS.keys()) + [BANK_PDF_TOOL],
+    "Tally Reverse Functionality": [MASTER_XML_TOOL, ODBC_TOOL],
+    "Excel Functionality": [CONSOLIDATE_TOOL, GSTR1_JSON_TOOL, COMPARE_TOOL],
+}
+
+
+def _select_tool(section_key):
+    """Make the clicked section's radio the active choice; clear the rest."""
+    choice = st.session_state.get(section_key)
+    if choice is None:
+        return
+    st.session_state["active_tool"] = choice
+    for i in range(len(TOOL_SECTIONS)):
+        other = f"nav_section_{i}"
+        if other != section_key:
+            st.session_state[other] = None
+
+
+if "active_tool" not in st.session_state:
+    st.session_state["active_tool"] = next(iter(TOOL_SECTIONS.values()))[0]
+
+for i, (section, options) in enumerate(TOOL_SECTIONS.items()):
+    key = f"nav_section_{i}"
+    if key not in st.session_state:
+        active = st.session_state["active_tool"]
+        st.session_state[key] = active if active in options else None
+    with st.sidebar.expander(
+            section, expanded=st.session_state["active_tool"] in options):
+        st.radio(section, options, key=key, label_visibility="collapsed",
+                 on_change=_select_tool, args=(key,))
+
+tool_name = st.session_state["active_tool"]
 
 # ==========================================================================
 # Bank / loan statement PDF  ->  Payment/Contra/Receipt template (LLM).

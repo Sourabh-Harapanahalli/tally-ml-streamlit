@@ -2183,13 +2183,26 @@ if uploaded is not None:
             st.markdown("**Duplicate GST numbers:** " +
                         ", ".join(f"`{g}`" for g in dup_values))
 
-            dup_rows = val_df[dup_mask]
+            # Group matching GST numbers on consecutive rows (file order kept
+            # within each group) and show the Excel row number for each.
+            dup_rows = val_df[dup_mask].copy()
+            dup_rows.insert(0, "Row", dup_rows.index + 2)  # 1-based + header
+            # GST_NO right after Row, so the matching values are side by side.
+            dup_rows.insert(1, "GST_NO", dup_rows.pop("GST_NO"))
+            gst_key = dup_rows["GST_NO"].astype(str).str.strip().str.upper()
+            dup_rows = dup_rows.assign(_gst=gst_key).sort_values(
+                ["_gst", "Row"], kind="stable")
+            # Alternate the highlight shade per group so neighbouring groups
+            # are easy to tell apart.
+            group_no = (dup_rows["_gst"] != dup_rows["_gst"].shift()).cumsum()
+            shades = ["#ffd6d6" if g % 2 else "#ffb3b3" for g in group_no]
+            dup_rows = dup_rows.drop(columns="_gst").reset_index(drop=True)
             styled = dup_rows.style.apply(
-                lambda col: ["background-color: #ffd6d6"] * len(col)
+                lambda col: [f"background-color: {s}" for s in shades]
                 if col.name == "GST_NO" else [""] * len(col),
                 axis=0,
             )
-            st.dataframe(styled, use_container_width=True)
+            st.dataframe(styled, use_container_width=True, hide_index=True)
         elif val_df is not None:
             st.success("✅ No duplicate GST numbers found.")
 

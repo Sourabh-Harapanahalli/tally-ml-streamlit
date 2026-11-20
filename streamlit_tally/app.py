@@ -10,16 +10,20 @@ Run:  streamlit run app.py
 """
 
 import difflib
+import hashlib
 import html
 import io
 import os
 import re
+import threading
+import time
 import zipfile
 from datetime import date
 
 import pandas as pd
 import streamlit as st
 from openpyxl import load_workbook
+from streamlit.runtime.scriptrunner import add_script_run_ctx, get_script_run_ctx
 
 import tally_core
 import bank_pdf
@@ -1090,6 +1094,79 @@ def pcr_ledger_check_ui(file_bytes):
 
 
 # --------------------------------------------------------------------------
+# Run / progress / restart helpers shared by the Tally tools.
+# --------------------------------------------------------------------------
+def run_with_progress(fn, *args, label="Running"):
+    """Run ``fn(*args)`` in a worker thread while a progress bar slides along.
+
+    The converters don't report real progress, so the bar eases toward 95%
+    while the work runs, then slides to 100% once it finishes. Exceptions
+    from ``fn`` are re-raised after the bar is cleared.
+    """
+    bar = st.progress(0, text=f"{label}… 0%")
+    box = {}
+
+    def work():
+        try:
+            box["result"] = fn(*args)
+        except BaseException as exc:  # noqa: BLE001 - re-raised below
+            box["error"] = exc
+
+    worker = threading.Thread(target=work, daemon=True)
+    add_script_run_ctx(worker, get_script_run_ctx())
+    worker.start()
+    pct = 0.0
+    while worker.is_alive():
+        pct += (95 - pct) * 0.06
+        bar.progress(int(pct), text=f"{label}… {int(pct)}%")
+        worker.join(0.1)
+    if "error" in box:
+        bar.empty()
+        raise box["error"]
+    for p in range(int(pct), 101, 4):
+        bar.progress(p, text=f"{label}… {p}%")
+        time.sleep(0.03)
+    bar.empty()  # the caller shows the persistent "Completed — 100%" bar
+    return box["result"]
+
+
+def file_signature(*parts):
+    """Stable hash of the run inputs, used to tell if a stored result is current."""
+    h = hashlib.sha256()
+    for part in parts:
+        h.update(part if isinstance(part, bytes) else str(part).encode())
+    return h.hexdigest()
+
+
+def uploader_nonce(state_key):
+    """Suffix for an uploader's widget key; bumping it clears the upload."""
+    return st.session_state.get(f"{state_key}_nonce", 0)
+
+
+# Per-file state from the checks (fixes, skip choice, …) cleared on Restart.
+# Date-range settings and the Tally connection/ledger list are kept.
+_RESTART_STATE = ("_datecorr", "_date_all", "_dp_", "_corrections",
+                  "_chk_skip", "_chk_search_", "_chk_sugg_", "_chk_fix_",
+                  "_chk_convert_anyway")
+
+
+def restart_tool(state_key, check_prefix=None):
+    """on_click for Restart: drop the result, uploaded file and file fixes."""
+    st.session_state[f"{state_key}_nonce"] = uploader_nonce(state_key) + 1
+    st.session_state.pop(f"{state_key}_result", None)
+    if check_prefix:
+        for key in list(st.session_state.keys()):
+            if any(key.startswith(check_prefix + s) for s in _RESTART_STATE):
+                del st.session_state[key]
+
+
+def restart_button(state_key, check_prefix=None):
+    st.button("🔄 Restart", key=f"{state_key}_restart", on_click=restart_tool,
+              args=(state_key, check_prefix),
+              help="Clear the uploaded file and its results to start fresh.")
+
+
+# --------------------------------------------------------------------------
 # UI
 # --------------------------------------------------------------------------
 st.sidebar.title("📒 TALLY ML")
@@ -1162,21 +1239,36 @@ if tool_name == BANK_PDF_TOOL:
                    "app folder (or the environment) and reload.")
 
     pdf_file = st.file_uploader("Upload the statement PDF", type=["pdf"],
-                                key="uploader_bank_pdf")
+                                key=f"uploader_bank_pdf_{uploader_nonce('bank_pdf')}")
 
     if pdf_file is not None:
-        usage = None
-        with st.spinner(f"Reading the statement pages with {model}…"):
-            try:
-                pcr_df, usage = convert_statement_pdf(pdf_file.getvalue(), model)
-            except ImportError as exc:
-                pcr_df = None
-                st.error("A required package is missing. Run "
-                         "`pip install openai google-genai pypdfium2`. "
-                         f"({exc})")
-            except Exception as exc:  # noqa: BLE001
-                pcr_df = None
-                st.error(f"Could not convert the statement: {exc}")
+        sig = file_signature(pdf_file.getvalue(), model)
+        stored = st.session_state.get("bank_pdf_result")
+        if not (stored and stored["sig"] == sig):
+            stored = None
+            run_slot = st.empty()
+            if run_slot.button("▶️ Run", key="bank_pdf_run", type="primary"):
+                run_slot.empty()
+                try:
+                    pcr_df, usage = run_with_progress(
+                        convert_statement_pdf, pdf_file.getvalue(), model,
+                        label=f"Reading the statement pages with {model}")
+                    stored = {"sig": sig, "pcr_df": pcr_df, "usage": usage}
+                    st.session_state["bank_pdf_result"] = stored
+                except ImportError as exc:
+                    st.error("A required package is missing. Run "
+                             "`pip install openai google-genai pypdfium2`. "
+                             f"({exc})")
+                    restart_button("bank_pdf")
+                except Exception as exc:  # noqa: BLE001
+                    st.error(f"Could not convert the statement: {exc}")
+                    restart_button("bank_pdf")
+            else:
+                st.caption("Click **Run** to read the statement.")
+
+        pcr_df, usage = (stored["pcr_df"], stored["usage"]) if stored else (None, None)
+        if stored:
+            st.progress(100, text="✅ Completed — 100%")
 
         if pcr_df is not None and pcr_df.empty:
             st.warning(
@@ -1229,6 +1321,9 @@ if tool_name == BANK_PDF_TOOL:
             st.caption("Tip: upload the .xlsx under **Payment / Contra / "
                        "Receipt** to run the ledger, date and empty-cell checks "
                        "before importing to Tally.")
+
+        if stored:
+            restart_button("bank_pdf")
 
     st.stop()
 
@@ -1810,7 +1905,7 @@ st.subheader("Step 2 — Upload your filled template")
 uploaded = st.file_uploader(
     "Upload the completed Excel file",
     type=["xlsx", "xls"],
-    key=f"uploader_{tool['upload_key']}",
+    key=f"uploader_{tool['upload_key']}_{uploader_nonce(tool['upload_key'])}",
 )
 
 if uploaded is not None:
@@ -2018,49 +2113,68 @@ if uploaded is not None:
             st.warning("Set a valid From/To date range above to validate "
                        "voucher dates.")
 
-    st.subheader("Step 3 — Convert")
-    with st.spinner("Converting to Tally XML…"):
-        try:
-            # Hand the converter a fresh, seekable copy of the (corrected) bytes.
-            result = tool["convert"](io.BytesIO(convert_bytes))
+    st.subheader("Step 3 — Run")
+    state_key = tool["upload_key"]
+    sig = file_signature(convert_bytes)
+    stored = st.session_state.get(f"{state_key}_result")
+    if not (stored and stored["sig"] == sig):
+        stored = None
+        run_slot = st.empty()
+        if run_slot.button("▶️ Run", key=f"{state_key}_run", type="primary"):
+            run_slot.empty()
+            try:
+                # Hand the converter a fresh, seekable copy of the (corrected) bytes.
+                result = run_with_progress(
+                    tool["convert"], io.BytesIO(convert_bytes),
+                    label="Converting to Tally XML")
+                stored = {"sig": sig, "result": result}
+                st.session_state[f"{state_key}_result"] = stored
+            except Exception as exc:  # noqa: BLE001
+                st.error(f"Conversion failed: {exc}")
+                st.exception(exc)
+                restart_button(state_key, KEY_PREFIX.get(tool_name))
+        else:
+            st.caption("Click **Run** to convert the uploaded file.")
 
-            xml_final = result.get("xml_final") if result else None
-            file_name = (result.get("file_name") if result else None) or "tally"
+    if stored:
+        result = stored["result"]
+        xml_final = result.get("xml_final") if result else None
+        file_name = (result.get("file_name") if result else None) or "tally"
 
-            if not xml_final:
-                st.error(
-                    "No output was produced. Check that the uploaded file matches "
-                    "the template (correct sheet names and column headers)."
+        if not xml_final:
+            st.progress(100, text="✅ Completed — 100%")
+            st.error(
+                "No output was produced. Check that the uploaded file matches "
+                "the template (correct sheet names and column headers)."
+            )
+        else:
+            st.progress(100, text="✅ Completed — 100%")
+            st.success("Done! Download your files below.")
+
+            col1, col2, col3 = st.columns(3)
+            with col1:
+                st.download_button(
+                    "⬇️ Tally XML",
+                    data=tally_core.result_xml_bytes(result),
+                    file_name=f"{file_name}.xml",
+                    mime="application/xml",
                 )
-            else:
-                st.success("Done! Download your files below.")
+            with col2:
+                st.download_button(
+                    "⬇️ Excel (.xlsx)",
+                    data=tally_core.result_excel_bytes(result),
+                    file_name="data.xlsx",
+                    mime=XLSX_MIME,
+                )
+            with col3:
+                st.download_button(
+                    "⬇️ Both (.zip)",
+                    data=tally_core.result_zip_bytes(result),
+                    file_name="files.zip",
+                    mime="application/zip",
+                )
 
-                col1, col2, col3 = st.columns(3)
-                with col1:
-                    st.download_button(
-                        "⬇️ Tally XML",
-                        data=tally_core.result_xml_bytes(result),
-                        file_name=f"{file_name}.xml",
-                        mime="application/xml",
-                    )
-                with col2:
-                    st.download_button(
-                        "⬇️ Excel (.xlsx)",
-                        data=tally_core.result_excel_bytes(result),
-                        file_name="data.xlsx",
-                        mime=XLSX_MIME,
-                    )
-                with col3:
-                    st.download_button(
-                        "⬇️ Both (.zip)",
-                        data=tally_core.result_zip_bytes(result),
-                        file_name="files.zip",
-                        mime="application/zip",
-                    )
-
-                with st.expander("Preview generated XML"):
-                    st.code(xml_final[:5000] + ("\n…" if len(xml_final) > 5000 else ""),
-                            language="xml")
-        except Exception as exc:  # noqa: BLE001
-            st.error(f"Conversion failed: {exc}")
-            st.exception(exc)
+            with st.expander("Preview generated XML"):
+                st.code(xml_final[:5000] + ("\n…" if len(xml_final) > 5000 else ""),
+                        language="xml")
+        restart_button(state_key, KEY_PREFIX.get(tool_name))

@@ -1666,8 +1666,7 @@ if tool_name == MARG_MASTER_TOOL:
     st.markdown(
         f"""
 1. In Marg, go to {MARG_TALLY_EXPORT_PATH}.
-2. Choose your Tally version — **Tally 9 Import/Export** for Tally.ERP 9, or
-   **Tally Prime** — and click **Okay**.
+2. Select **Tally 9 Import/Export** and click **Okay**.
 3. In the **Tally Import/Export** window, set **Import/Export** to
    **Export Marg to Tally**.
 4. In **Export Options**, select **Masters**.
@@ -1680,19 +1679,8 @@ if tool_name == MARG_MASTER_TOOL:
     )
 
     st.divider()
-    st.subheader("Step 2 — Import the masters into Tally")
-    prime_tab, erp9_tab = st.tabs(["Tally Prime", "Tally.ERP 9"])
-    prime_tab.markdown(
-        """
-1. Open the company in Tally Prime (create it first if it is new, with the
-   same financial year as Marg).
-2. Press **Alt + O** (Import) and choose **Masters**.
-3. In **File path**, select the masters file Marg saved in Step 1.
-4. Set the behaviour for existing masters to **Modify with new data**.
-5. Press **Enter** to import.
-"""
-    )
-    erp9_tab.markdown(
+    st.subheader("Step 2 — Import the masters into Tally.ERP 9")
+    st.markdown(
         """
 1. Open the company (**Alt + F3** to create it, with the same financial year
    and books-beginning date as Marg).
@@ -1790,8 +1778,7 @@ if tool_name == MARG_VOUCHER_TOOL:
     st.markdown(
         f"""
 1. In Marg, go to {MARG_TALLY_EXPORT_PATH}.
-2. Choose your Tally version — **Tally 9 Import/Export** for Tally.ERP 9, or
-   **Tally Prime** — and click **Okay**.
+2. Select **Tally 9 Import/Export** and click **Okay**.
 3. In the **Tally Import/Export** window, set **Import/Export** to
    **Export Marg to Tally**.
 4. In **Export Options**, select **Transactions**. (Select both **Masters**
@@ -1810,18 +1797,8 @@ if tool_name == MARG_VOUCHER_TOOL:
     )
 
     st.divider()
-    st.subheader("Step 2 — Import the vouchers into Tally")
-    prime_tab, erp9_tab = st.tabs(["Tally Prime", "Tally.ERP 9"])
-    prime_tab.markdown(
-        """
-1. Open the company and make sure the masters are already imported.
-2. Set the period (**Alt + F2**) to cover the voucher dates.
-3. Press **Alt + O** (Import) and choose **Transactions**.
-4. In **File path**, select the daybook file Marg saved in Step 1.
-5. Press **Enter** to import.
-"""
-    )
-    erp9_tab.markdown(
+    st.subheader("Step 2 — Import the vouchers into Tally.ERP 9")
+    st.markdown(
         """
 1. Open the company and make sure the masters are already imported.
 2. Press **Alt + F2** and set the from and to dates to cover the vouchers.

@@ -1246,12 +1246,23 @@ def ml_gst_check_ui(file_bytes, key_prefix="ml"):
         open_rows = [c for c in conflicts if c["row_index"] not in fixes
                      and not st.session_state.get(
                          f"{key_prefix}_chk_ignore_{c['row_index']}")]
-        if open_rows and st.button(
-                f"✨ Fix all {len(open_rows)} — use the existing Tally names",
-                key=f"{key_prefix}_chk_fix_all", type="primary"):
-            for c in open_rows:
-                fixes[c["row_index"]] = c["tally_names"][0]
-            st.rerun()
+        if open_rows:
+            b1, b2 = st.columns(2)
+            if b1.button(
+                    f"✨ Fix all {len(open_rows)} — use the existing Tally names",
+                    key=f"{key_prefix}_chk_fix_all", type="primary",
+                    use_container_width=True):
+                for c in open_rows:
+                    fixes[c["row_index"]] = c["tally_names"][0]
+                st.rerun()
+            if b2.button(
+                    f"➖ Ignore all {len(open_rows)} — keep the file's names",
+                    key=f"{key_prefix}_chk_ignore_all",
+                    use_container_width=True):
+                # Set the per-row Ignore checkboxes before they render below.
+                for c in open_rows:
+                    st.session_state[f"{key_prefix}_chk_ignore_{c['row_index']}"] = True
+                st.rerun()
 
         for c in conflicts:
             ri = c["row_index"]

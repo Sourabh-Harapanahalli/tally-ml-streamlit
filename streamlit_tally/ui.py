@@ -389,7 +389,7 @@ def sidebar_nav(sections, meta, active):
             for t, tool in enumerate(tools):
                 info = meta.get(tool, {})
                 st.button(
-                    f"{info.get('icon', '•')}  {info.get('nav', tool)}",
+                    f"{info.get('icon', '•')}  {info.get('title', tool)}",
                     key=f"{'navA' if tool == active else 'nav'}_{s}_{t}",
                     on_click=go_to, args=(tool,), use_container_width=True,
                     help=info.get("desc"))
@@ -424,7 +424,7 @@ def home(sections, meta, section_notes):
 
     def matches(tool):
         info = meta.get(tool, {})
-        text = " ".join([tool, info.get("nav", ""), info.get("desc", ""),
+        text = " ".join([tool, info.get("title", ""), info.get("desc", ""),
                          info.get("tags", "")]).lower()
         return all(w in text for w in words)
 
@@ -443,7 +443,7 @@ def home(sections, meta, section_notes):
                 key = f"{s}_{slug(tool)}"
                 with col, st.container(key=f"card_{key}"):
                     _html(f'<div class="tm-card-icon">{info.get("icon", "•")}</div>'
-                          f'<div class="tm-card-title">{html.escape(tool)}</div>'
+                          f'<div class="tm-card-title">{html.escape(info.get("title", tool))}</div>'
                           f'<div class="tm-card-desc">{html.escape(info.get("desc", ""))}</div>')
                     st.button("Open  →", key=f"open_{key}", on_click=go_to,
                               args=(tool,), use_container_width=True)
@@ -459,9 +459,9 @@ def page_header(tool, meta, section=""):
     """Breadcrumb, icon tile, title and one-line description for a tool."""
     info = meta.get(tool, {})
     crumb = f'Home  ›  {html.escape(section)}  ›  ' if section else "Home  ›  "
-    _html(f'<div class="tm-crumb">{crumb}<b>{html.escape(info.get("nav", tool))}</b></div>'
+    _html(f'<div class="tm-crumb">{crumb}<b>{html.escape(info.get("title", tool))}</b></div>'
           f'<div class="tm-head"><div class="tm-head-icon">{info.get("icon", "•")}</div><div>'
-          f'<div class="tm-head-title">{html.escape(tool)}</div>'
+          f'<div class="tm-head-title">{html.escape(info.get("title", tool))}</div>'
           f'<div class="tm-head-sub">{html.escape(info.get("desc", ""))}</div></div></div>')
 
 

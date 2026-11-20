@@ -1412,93 +1412,109 @@ def restart_button(state_key, check_prefix=None):
 # --------------------------------------------------------------------------
 # Sidebar sections, in the order they appear in the menu and on Home.
 TOOL_SECTIONS = {
-    "Tally Functionality": list(TOOLS.keys()) + [BANK_PDF_TOOL,
+    "Excel to Tally": list(TOOLS.keys()) + [BANK_PDF_TOOL,
                                                 ERROR_LOG_TOOL],
-    "Tally Reverse Functionality": [MASTER_XML_TOOL, ODBC_TOOL],
-    "MARG to Tally Converter": [MARG_MASTER_TOOL, MARG_VOUCHER_TOOL,
+    "Tally to Excel": [MASTER_XML_TOOL, ODBC_TOOL],
+    "Marg to Tally": [MARG_MASTER_TOOL, MARG_VOUCHER_TOOL,
                                 MARG_LEDGER_TOOL],
-    "Excel Functionality": [CONSOLIDATE_TOOL, GSTR1_JSON_TOOL, COMPARE_TOOL],
+    "Excel & GST Tools": [CONSOLIDATE_TOOL, GSTR1_JSON_TOOL, COMPARE_TOOL],
 }
 SECTION_NOTES = {
-    "Tally Functionality":
+    "Excel to Tally":
         "Turn your Excel sheets and statements into files Tally can import.",
-    "Tally Reverse Functionality":
+    "Tally to Excel":
         "Bring data out of Tally and back into Excel.",
-    "MARG to Tally Converter":
+    "Marg to Tally":
         "Move a company's books from Marg ERP 9+ into Tally.",
-    "Excel Functionality":
+    "Excel & GST Tools":
         "Everyday helpers for Excel and GST files.",
 }
-# Per tool: icon, short menu label, a plain-language line saying what it is
-# for, and extra search words for the Home screen.
+# Per tool: icon, the plain-language name shown on screen, a line saying what
+# it is for, and extra search words for the Home screen. The dictionary keys
+# are the internal tool names used throughout this file.
 TOOL_META = {
     "Purchase / Sales": {
-        "icon": "🧾", "nav": "Purchase / Sales",
+        "title": "Purchase & Sales Bills",
+        "icon": "🧾",
         "desc": "Turn purchase and sales bills in Excel into Tally vouchers, "
                 "with GST worked out for you.",
         "tags": "invoice bill voucher gst cgst sgst igst xml"},
     "Payment / Contra / Receipt": {
-        "icon": "💸", "nav": "Payment / Contra / Receipt",
-        "desc": "Turn payments, receipts and bank transfers in Excel into "
-                "Tally vouchers.",
+        "title": "Payments & Receipts",
+        "icon": "💸",
+        "desc": "Turn payments, receipts and bank transfers (contra) in "
+                "Excel into Tally vouchers.",
         "tags": "voucher bank cash xml"},
     "Master — Ledger": {
-        "icon": "📇", "nav": "Master — Ledger",
-        "desc": "Create customers, suppliers and other ledgers in Tally from "
-                "an Excel list.",
+        "title": "Ledgers",
+        "icon": "📇",
+        "desc": "Create customers, suppliers and other ledger masters in "
+                "Tally from an Excel list.",
         "tags": "party customer supplier gstin opening balance group xml"},
     "Master — Duties & Taxes": {
-        "icon": "🏛️", "nav": "Master — Duties & Taxes",
+        "title": "GST Tax Ledgers",
+        "icon": "🏛️",
         "desc": "Create GST tax ledgers (CGST, SGST, IGST) in Tally.",
         "tags": "gst tax ledger xml"},
     "Master — Purchase/Sales Ledgers": {
-        "icon": "🏷️", "nav": "Master — Purchase/Sales Ledgers",
+        "title": "Purchase & Sales Ledgers",
+        "icon": "🏷️",
         "desc": "Create purchase and sales ledgers with their GST rates.",
         "tags": "gst rate ledger xml"},
     BANK_PDF_TOOL: {
-        "icon": "🏦", "nav": "Bank Statement PDF",
+        "title": "Bank Statement (PDF)",
+        "icon": "🏦",
         "desc": "Read a bank or loan statement PDF and turn it into payment "
                 "and receipt entries.",
         "tags": "bank loan statement pdf ai payment receipt"},
     ERROR_LOG_TOOL: {
-        "icon": "🩺", "nav": "Tally Error Log Viewer",
+        "title": "Tally Import Errors",
+        "icon": "🩺",
         "desc": "See why a Tally import failed, explained in plain language.",
         "tags": "tally.imp import error log failed"},
     MASTER_XML_TOOL: {
-        "icon": "↩️", "nav": "Master XML → Excel",
+        "title": "Tally Ledgers to Excel",
+        "icon": "↩️",
         "desc": "Turn a masters export from Tally back into an Excel list of "
                 "ledgers.",
         "tags": "tally export xml excel ledger reverse"},
     ODBC_TOOL: {
-        "icon": "🔌", "nav": "Tally ODBC — Live Data",
+        "title": "Live Tally Data",
+        "icon": "🔌",
         "desc": "Look at live data from a Tally company that is open on this "
                 "computer.",
         "tags": "odbc live sql ledger connect"},
     MARG_MASTER_TOOL: {
-        "icon": "📦", "nav": "MARG Master",
+        "title": "Marg Masters",
+        "icon": "📦",
         "desc": "Move ledgers and other masters from Marg into Tally, or "
                 "into Excel.",
         "tags": "marg erp master ledger xml export"},
     MARG_VOUCHER_TOOL: {
-        "icon": "📑", "nav": "MARG Voucher",
+        "title": "Marg Vouchers",
+        "icon": "📑",
         "desc": "Move sales, purchases, payments and receipts from Marg into "
                 "Tally, or into Excel.",
         "tags": "marg erp daybook voucher xml export"},
     MARG_LEDGER_TOOL: {
-        "icon": "🗂️", "nav": "MARG Ledger DBF",
+        "title": "Marg Ledger File (DBF)",
+        "icon": "🗂️",
         "desc": "Convert Marg's ledger export (.dbf) into the Master — "
                 "Ledger Excel format.",
         "tags": "marg erp dbf ledger master"},
     CONSOLIDATE_TOOL: {
-        "icon": "🧩", "nav": "Consolidate Excel Files",
+        "title": "Merge Excel Files",
+        "icon": "🧩",
         "desc": "Merge several Excel files into one, sheet by sheet.",
         "tags": "merge combine workbook excel"},
     GSTR1_JSON_TOOL: {
-        "icon": "📊", "nav": "GSTR-1 JSON → Excel",
+        "title": "GSTR-1 JSON to Excel",
+        "icon": "📊",
         "desc": "Convert a GSTR-1 JSON file from the GST portal into Excel.",
         "tags": "gst gstr1 json b2b hsn portal"},
     COMPARE_TOOL: {
-        "icon": "🔍", "nav": "Find Missing Values",
+        "title": "Compare Two Excel Files",
+        "icon": "🔍",
         "desc": "Find values that are in one Excel file but missing from "
                 "another.",
         "tags": "compare excel missing difference"},
@@ -1814,7 +1830,7 @@ if tool_name == MARG_MASTER_TOOL:
         marg_workbook_downloads(books, "Marg_Masters.zip", "marg_master_dl")
         st.caption(
             "Each file matches the template of the tool with the same name "
-            "under **Tally Functionality** — upload it there to get the "
+            "under **Excel to Tally** — upload it there to get the "
             "Tally XML.")
 
     st.divider()
@@ -1825,7 +1841,7 @@ if tool_name == MARG_MASTER_TOOL:
   the usual cause. Rename it in Marg and export again.
 - **Marg writes an `EXP` log and Tally an `IMP` log** listing what failed.
 - **You only need the ledgers, or want to review them first** — use
-  **MARG Ledger DBF → Master — Ledger** in this section instead.
+  **Marg Ledger File (DBF)** in this section instead.
 """
     )
     marg_tally_export_footer()
@@ -1838,7 +1854,7 @@ if tool_name == MARG_VOUCHER_TOOL:
         "Move your **vouchers** (the day book: sales, purchases, receipts, "
         "payments…) from Marg ERP 9+ into Tally using Marg's built-in "
         "**Tally Export**. Import the **masters** into Tally first — see "
-        "**MARG Master (Tally Export)**."
+        "**Marg Masters**."
     )
     marg_tally_export_prerequisites()
 
@@ -1900,8 +1916,8 @@ should match.
     ui.step("Step 4 — Or convert the daybook file to Excel")
     st.caption(
         "Instead of importing Marg's file straight into Tally, upload it "
-        "here to get the vouchers in this app's **Purchase / Sales** and "
-        "**Payment / Contra / Receipt** templates.")
+        "here to get the vouchers in this app's **Purchase & Sales Bills** and "
+        "**Payments & Receipts** templates.")
     daybook_file = st.file_uploader(
         "Upload the daybook XML written by Marg's Tally Export",
         type=["xml"], key="uploader_marg_daybook_xml")
@@ -1954,9 +1970,9 @@ should match.
 
         marg_workbook_downloads(books, "Marg_Vouchers.zip", "marg_voucher_dl")
         st.caption(
-            "Upload Sales.xlsx and Purchase.xlsx in **Purchase / Sales**, and "
-            "the other two in **Payment / Contra / Receipt**, under **Tally "
-            "Functionality**, to get the Tally XML.")
+            "Upload Sales.xlsx and Purchase.xlsx in **Purchase & Sales Bills**, "
+            "and the other two in **Payments & Receipts**, under **Excel to "
+            "Tally**, to get the Tally XML.")
 
     marg_tally_export_footer()
     st.stop()
@@ -1975,7 +1991,7 @@ if tool_name == MARG_LEDGER_TOOL:
     ui.page_header(MARG_LEDGER_TOOL, TOOL_META, SECTION_OF.get(MARG_LEDGER_TOOL, ""))
     st.info(
         "Upload the ledger master exported from **Marg ERP 9+** as a `.dbf` "
-        "file. Each ledger is converted into the **Master — Ledger** format, "
+        "file. Each ledger is converted into the **Ledgers** Excel format, "
         "ready to download as Excel or as Tally XML."
     )
 
@@ -2020,8 +2036,8 @@ export rights first: **Masters > Marg Setups > Control Room**, search
         "Tally groups below are suggestions worked out from the ledgers under "
         "each code — check them, change any that are wrong, and untick the "
         "codes you don't want. Tax, purchase and sales ledgers are unticked "
-        "by default: create those with the **Master — Duties & Taxes** and "
-        "**Master — Purchase/Sales Ledgers** tools, which set the tax rates."
+        "by default: create those with the **GST Tax Ledgers** and "
+        "**Purchase & Sales Ledgers** tools, which set the tax rates."
     )
     group_table = st.data_editor(
         marg_dbf.group_summary(marg_records),
@@ -2105,7 +2121,7 @@ export rights first: **Masters > Marg Setups > Control Room**, search
         d2.error(f"Could not build the Tally XML: {exc}")
     st.caption(
         "To run the duplicate-GST and Tally ledger checks first, download the "
-        "Excel and upload it in **Tally Functionality → Master — Ledger**.")
+        "Excel and upload it in **Excel to Tally → Ledgers**.")
 
     st.stop()
 
@@ -2219,8 +2235,8 @@ if tool_name == BANK_PDF_TOOL:
             except Exception as exc:  # noqa: BLE001
                 c2.warning(f"Could not build XML: {exc}")
 
-            st.caption("Tip: upload the .xlsx under **Payment / Contra / "
-                       "Receipt** to run the ledger, date and empty-cell checks "
+            st.caption("Tip: upload the .xlsx under **Payments & "
+                       "Receipts** to run the ledger, date and empty-cell checks "
                        "before importing to Tally.")
 
         if stored:
@@ -2699,7 +2715,7 @@ if tool_name == MASTER_XML_TOOL:
     ui.page_header(MASTER_XML_TOOL, TOOL_META, SECTION_OF.get(MASTER_XML_TOOL, ""))
     st.info(
         "Upload a Tally **All Masters** XML export (e.g. `Master.xml`). Each "
-        "ledger is extracted into the **Master — Ledger** Excel format "
+        "ledger is extracted into the **Ledgers** Excel format "
         "(Ledger_Name, Alias, Group_Name, Country, State_Name, Pincode, "
         "Registration_Type, GST_NO, Opening_Balance, Dr/Cr, Address)."
     )

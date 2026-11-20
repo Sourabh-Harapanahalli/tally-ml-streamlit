@@ -175,7 +175,7 @@ def parse_masters(xml_text, standard_groups=True):
         if "<VOUCHER " in xml_text:
             raise MargXmlError(
                 "This is the daybook (vouchers) file — upload it on the "
-                "MARG Voucher page. This page needs the masters file.")
+                "Marg Vouchers page. This page needs the masters file.")
         raise MargXmlError("No <LEDGER> records found. Upload the masters "
                            "file written by Marg's Tally Export.")
 
@@ -334,7 +334,7 @@ def parse_vouchers(xml_text):
     if not blocks:
         if "<LEDGER NAME=" in xml_text:
             raise MargXmlError(
-                "This is the masters file — upload it on the MARG Master "
+                "This is the masters file — upload it on the Marg Masters "
                 "page. This page needs the daybook (vouchers) file.")
         raise MargXmlError("No <VOUCHER> records found. Upload the daybook "
                            "file written by Marg's Tally Export.")

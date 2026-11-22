@@ -2827,6 +2827,12 @@ if tool_name == GST_PORTAL_TOOL:
         "ledgers, ready for the Purchase & Sales Bills format."
     )
 
+    # Streamlit forgets a widget's value while the widget is off the page.
+    # Re-saving the ledger picks keeps them when an earlier answer is changed
+    # and Step 5 is closed for a moment.
+    for key in [k for k in st.session_state if k.startswith("gp_ledger_")]:
+        st.session_state[key] = st.session_state[key]
+
     ui.step("Step 1 — Upload the Excel from the GST portal")
     gp_file = st.file_uploader(
         "Upload the GST portal Excel", type=["xlsx", "xlsm"],
@@ -2848,6 +2854,18 @@ if tool_name == GST_PORTAL_TOOL:
     # Widget keys carry the file's signature, so a new file starts from its
     # own defaults instead of the previous file's answers.
     gp_key = f"gp_{uploader_nonce('gp')}_{file_signature(gp_bytes)[:10]}"
+
+    def gp_next(name, label, *answers):
+        """A button that opens the next part of the page. Returns True once
+        it has been pressed for the current ``answers``; changing an earlier
+        answer closes that part again until the button is pressed once more."""
+        key, sig = f"{gp_key}_go_{name}", file_signature(repr(answers))
+        if st.session_state.get(key) != sig:
+            if st.button(label, type="primary", key=f"{key}_btn"):
+                st.session_state[key] = sig
+                st.rerun()
+            return False
+        return True
 
     # ---- Step 2: the header row ------------------------------------------
     ui.step("Step 2 — Which row has the column headings?")
@@ -2878,6 +2896,9 @@ if tool_name == GST_PORTAL_TOOL:
     st.caption(f"Row **{gp_header_row}** (shaded) is read as the headings; "
                "the bills start on the row below it.")
 
+    if not gp_next("header", "Next — choose the sheets ➜", gp_header_row):
+        st.stop()
+
     # ---- Step 3: what each sheet becomes ---------------------------------
     ui.step("Step 3 — Choose what each sheet becomes")
     gp_chosen, gp_bad = {}, []
@@ -2896,7 +2917,11 @@ if tool_name == GST_PORTAL_TOOL:
         if choice == gst_portal.SKIP:
             c_note.caption("Left out.")
             continue
-        missing = gp_classify(gp_bytes, n, gp_header_row)["missing"]
+        # Only the headings are looked at here; the rows are checked in Step 4.
+        missing = ([label for label, _ in gst_portal.TAX_COLUMNS.values()]
+                   if gp_header_row > len(gp_sheets[n]) else
+                   gst_portal.find_tax_columns(
+                       gp_sheets[n].iloc[gp_header_row - 1].tolist())[1])
         if missing:
             gp_bad.append(n)
             c_note.error(f"Row {gp_header_row} has no heading for: "
@@ -2913,6 +2938,9 @@ if tool_name == GST_PORTAL_TOOL:
         st.stop()
     if not gp_chosen:
         st.info("Choose at least one sheet to convert.")
+        st.stop()
+    gp_answers = (gp_header_row, tuple(gp_chosen.items()))
+    if not gp_next("sheets", "Next — GST rates ➜", *gp_answers):
         st.stop()
 
     # ---- Step 4: GST rate of every row -----------------------------------
@@ -2933,6 +2961,9 @@ if tool_name == GST_PORTAL_TOOL:
         st.warning("Tick at least one GST rate.")
         st.stop()
     gp_rates_text = " / ".join(str(r) for r in gp_rates)
+    gp_answers += (gp_rates,)
+    if not gp_next("rates", "Check the GST rates", *gp_answers):
+        st.stop()
     gp_results = {n: gp_classify(gp_bytes, n, gp_header_row, gp_rates)
                   for n in gp_chosen}
     for n, result in gp_results.items():
@@ -2956,21 +2987,24 @@ if tool_name == GST_PORTAL_TOOL:
                 if len(flagged) > 500:
                     note += f" Showing the first 500 of {len(flagged):,}."
                 st.caption(note)
-    with st.spinner("Preparing the checked Excel…"):
-        gp_review = gp_review_workbook(gp_bytes, tuple(gp_chosen), gp_header_row,
-                                       gp_rates)
-    st.download_button(
-        "⬇️ Download the checked Excel (rows to check highlighted)",
-        data=gp_review, file_name="GST_Portal_Rate_Check.xlsx", mime=XLSX_MIME,
-        key=f"{gp_key}_review")
+    if gp_next("review", "Prepare the checked Excel (rows to check highlighted)",
+               *gp_answers):
+        with st.spinner("Preparing the checked Excel…"):
+            gp_review = gp_review_workbook(gp_bytes, tuple(gp_chosen),
+                                           gp_header_row, gp_rates)
+        st.download_button(
+            "⬇️ Download the checked Excel (rows to check highlighted)",
+            data=gp_review, file_name="GST_Portal_Rate_Check.xlsx",
+            mime=XLSX_MIME, key=f"{gp_key}_review")
+    if not gp_next("ledgers", "Next — Tally ledgers ➜", *gp_answers):
+        st.stop()
 
     # ---- Step 5: Tally ledger for each rate ------------------------------
     ui.step("Step 5 — Pick the Tally ledger for each GST rate")
     st.caption("Connect to the Tally company that is open on this computer, "
                "then pick the ledgers for each GST rate: the purchase / sales "
                "ledger and the CGST and SGST tax ledgers for local bills, and "
-               "the purchase / sales ledger and the IGST tax ledger for "
-               "interstate bills.")
+               "the IGST ledger for interstate bills.")
     with st.expander("🔌 Tally connection", expanded="gp_tally_ledgers" not in st.session_state):
         gp_conn = odbc_connection_form("gp")
         st.caption(f"Connection string: `{gp_conn}`")
@@ -3002,8 +3036,8 @@ if tool_name == GST_PORTAL_TOOL:
 
     # A bill has either IGST or CGST + SGST, never both. Each rate therefore
     # needs, for local bills, a purchase/sales ledger plus CGST and SGST tax
-    # ledgers, and for interstate bills a purchase/sales ledger plus an IGST
-    # tax ledger — the 20 rows of the MASTER_LEDGER_NAME_LINK sheet.
+    # ledgers, and for interstate bills one IGST ledger, written to both the
+    # GST_<rate>_IGST and <rate>_IGST rows of the MASTER_LEDGER_NAME_LINK sheet.
     gp_map, gp_unset = {}, []
     for side in sorted({gst_portal.ledger_side(c) for c in gp_chosen.values()}):
         for igst, heading in ((False, "local bills (CGST + SGST)"),
@@ -3028,6 +3062,9 @@ if tool_name == GST_PORTAL_TOOL:
                         picked = col.text_input(link, key=f"{key}_typed", help=title,
                                                 placeholder="Exact Tally ledger name").strip()
                     gp_map[(side, link)] = picked or ""
+                    twin = gst_portal.igst_twin(link)
+                    if twin:      # GST_5_IGST takes the 5_IGST ledger
+                        gp_map[(side, twin)] = picked or ""
                     if used[rate] and not picked:
                         gp_unset.append(f"{side} {link}")
 
@@ -3035,6 +3072,9 @@ if tool_name == GST_PORTAL_TOOL:
         st.warning("Still to pick: " + ", ".join(gp_unset) + ".")
         st.stop()
     st.success("Every GST rate in use has its Tally ledgers.")
+    if not gp_next("build", "Create the Purchase & Sales file",
+                   *gp_answers, tuple(gp_map.items())):
+        st.stop()
 
     # ---- Step 6: the filled Purchase & Sales Bills template --------------
     ui.step("Step 6 — Download the Purchase & Sales Bills file")

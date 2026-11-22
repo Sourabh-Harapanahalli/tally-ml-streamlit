@@ -142,17 +142,22 @@ def link_rows(igst=False, rates=GST_RATES):
     """The MASTER_LEDGER_NAME_LINK rows a kind of bill needs, as a list of
     ``(row title, [(link column, rate), …])``: for local bills the purchase /
     sales ledger and the CGST and SGST tax ledgers of each rate, for
-    interstate bills the purchase / sales ledger and the IGST tax ledger."""
+    interstate bills the one IGST ledger of each rate (see ``igst_twin``)."""
     if igst:
-        return [
-            ("Purchase / sales ledger", [(group_name(r, True), r) for r in rates]),
-            ("IGST tax ledger", [(f"{r}_IGST", r) for r in rates]),
-        ]
+        return [("IGST ledger", [(f"{r}_IGST", r) for r in rates])]
     return [
         ("Purchase / sales ledger", [(group_name(r), r) for r in rates]),
         ("CGST tax ledger", [(f"{_HALF_RATE[r]}_CGST", r) for r in rates]),
         ("SGST tax ledger", [(f"{_HALF_RATE[r]}_SGST", r) for r in rates]),
     ]
+
+
+def igst_twin(link):
+    """GST_5_IGST for 5_IGST (and so on), else None. The two link-sheet rows
+    of an interstate rate take the same Tally ledger, so only <rate>_IGST is
+    asked for and its answer is written to both."""
+    m = re.fullmatch(r"(\d+)_IGST", link)
+    return group_name(int(m.group(1)), True) if m else None
 
 
 def _match_rate(taxable, tax, rates=GST_RATES):

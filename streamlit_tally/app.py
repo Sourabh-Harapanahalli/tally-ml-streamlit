@@ -2788,8 +2788,9 @@ if tool_name == MASTER_XML_TOOL:
 
 # ==========================================================================
 # GST portal Excel (GSTR-2B: B2B, B2B-CDNR, …)  ->  Purchase & Sales format.
-# So far: header row, what each sheet becomes, GST-rate grouping of every
-# row, and the Tally ledger for each rate. The template itself comes next.
+# Header row, what each sheet becomes, GST-rate grouping of every row, the
+# Tally ledger for each rate, then the filled Purchase & Sales template.
+# Credit / debit note sheets are checked but not written out yet.
 # ==========================================================================
 @st.cache_data(show_spinner=False)
 def gp_load_sheets(file_bytes):
@@ -2805,6 +2806,15 @@ def gp_classify(file_bytes, sheet, header_row):
 def gp_review_workbook(file_bytes, sheets, header_row):
     return gst_portal.build_review_workbook(
         {s: gp_classify(file_bytes, s, header_row) for s in sheets})
+
+
+@st.cache_data(show_spinner=False)
+def gp_template(file_bytes, header_row, sheets, vch_type, ledgers):
+    """Filled Purchase & Sales template for ``sheets``; ``ledgers`` is a
+    tuple of (GST column, Tally ledger name)."""
+    return gst_portal.build_template(
+        [(gp_classify(file_bytes, s, header_row), vch_type) for s in sheets],
+        dict(ledgers))
 
 
 if tool_name == GST_PORTAL_TOOL:
@@ -2909,7 +2919,8 @@ if tool_name == GST_PORTAL_TOOL:
     st.caption(
         "GST rate = (Integrated Tax + Central Tax + State/UT Tax) × 100 ÷ "
         "Taxable Value. A bill that lands on 5, 12, 18 or 28 goes into that "
-        "group. Bills that land anywhere else are highlighted for you to check.")
+        "group. Bills that land anywhere else — or that carry both IGST and "
+        "CGST/SGST — are highlighted for you to check.")
     gp_results = {n: gp_classify(gp_bytes, n, gp_header_row) for n in gp_chosen}
     for n, result in gp_results.items():
         st.markdown(f"**{n}** → {gp_chosen[n]}")
@@ -2942,7 +2953,8 @@ if tool_name == GST_PORTAL_TOOL:
     # ---- Step 5: Tally ledger for each rate ------------------------------
     ui.step("Step 5 — Pick the Tally ledger for each GST rate")
     st.caption("Connect to the Tally company that is open on this computer, "
-               "then pick the ledger the bills of each GST rate are posted to.")
+               "then pick the ledger the bills of each GST rate are posted to "
+               "— one for local bills and one for interstate (IGST) bills.")
     with st.expander("🔌 Tally connection", expanded="gp_tally_ledgers" not in st.session_state):
         gp_conn = odbc_connection_form("gp")
         st.caption(f"Connection string: `{gp_conn}`")
@@ -2972,35 +2984,72 @@ if tool_name == GST_PORTAL_TOOL:
         st.info("⏸️ Get the ledger list from Tally above to continue.")
         st.stop()
 
+    # A bill has either IGST or CGST + SGST, never both, so each rate needs
+    # one ledger for local bills and another for interstate (IGST) bills.
     gp_map, gp_unset = {}, []
     for side in sorted({gst_portal.ledger_side(c) for c in gp_chosen.values()}):
-        st.markdown(f"**{side} ledgers**")
-        used = {rate: sum(gp_results[n]["counts"][rate] for n, c in gp_chosen.items()
-                          if gst_portal.ledger_side(c) == side)
-                for rate in gst_portal.GST_RATES}
-        for col, rate in zip(st.columns(len(gst_portal.GST_RATES)), gst_portal.GST_RATES):
-            # The label stays fixed: a label that changes resets the choice.
-            label = f"GST {rate}%"
-            key = f"gp_ledger_{side}_{rate}"
-            if gp_ledgers:
-                picked = col.selectbox(label, gp_ledgers, index=None, key=key,
-                                       placeholder="Choose a ledger")
-            else:
-                picked = col.text_input(label, key=f"{key}_typed",
-                                        placeholder="Exact Tally ledger name").strip()
-            col.caption(f"{used[rate]:,} rows" if used[rate] else "Not used in this file")
-            gp_map[(side, rate)] = picked or ""
-            if used[rate] and not picked:
-                gp_unset.append(f"{side} {rate}%")
+        for igst, heading in ((False, "local bills (CGST + SGST)"),
+                              (True, "interstate bills (IGST)")):
+            st.markdown(f"**{side} ledgers — {heading}**")
+            for col, rate in zip(st.columns(len(gst_portal.GST_RATES)),
+                                 gst_portal.GST_RATES):
+                group = gst_portal.group_name(rate, igst)
+                used = sum(gp_results[n]["group_counts"][group]
+                           for n, c in gp_chosen.items()
+                           if gst_portal.ledger_side(c) == side)
+                # The label stays fixed: a label that changes resets the choice.
+                label = f"IGST {rate}%" if igst else f"GST {rate}%"
+                key = f"gp_ledger_{side}_{group}"
+                if gp_ledgers:
+                    picked = col.selectbox(label, gp_ledgers, index=None, key=key,
+                                           placeholder="Choose a ledger")
+                else:
+                    picked = col.text_input(label, key=f"{key}_typed",
+                                            placeholder="Exact Tally ledger name").strip()
+                col.caption(f"{used:,} rows" if used else "Not used in this file")
+                gp_map[(side, group)] = picked or ""
+                if used and not picked:
+                    gp_unset.append(f"{side} {label}")
 
     if gp_unset:
         st.warning("Still to pick: " + ", ".join(gp_unset) + ".")
-    else:
-        st.success("Every GST rate in use has a Tally ledger.")
-        st.dataframe(
-            pd.DataFrame([{"Bills": side, "GST rate": f"{rate}%", "Tally ledger": name}
-                          for (side, rate), name in gp_map.items() if name]),
-            use_container_width=True, hide_index=True)
+        st.stop()
+    st.success("Every GST rate in use has a Tally ledger.")
+
+    # ---- Step 6: the filled Purchase & Sales Bills template --------------
+    ui.step("Step 6 — Download the Purchase & Sales Bills file")
+    st.caption(
+        "Each bill is written in the **Purchase & Sales Bills** format: its "
+        "taxable value goes under its GST rate (the IGST column for an "
+        "interstate bill, never both), and the ledgers you picked "
+        "are filled in on the MASTER_LEDGER_NAME_LINK sheet. Bills marked "
+        "“To check” keep their GST columns **blank** and are shaded **red** "
+        "— fill those in by hand before converting.")
+    for vch in ("Purchase", "Sales"):
+        names = tuple(n for n, c in gp_chosen.items() if c == vch)
+        if not names:
+            continue
+        for n in names:
+            lacking = gst_portal.find_bill_columns(gp_results[n]["data"].columns)[1]
+            if lacking:
+                st.warning(f"**{n}** has no column for: {', '.join(lacking)}. "
+                           "Those cells are left blank.")
+        with st.spinner(f"Filling the {vch} file…"):
+            book, written, to_check = gp_template(
+                gp_bytes, gp_header_row, names, vch,
+                tuple((g, name) for (side, g), name in gp_map.items()
+                      if side == vch))
+        st.markdown(
+            f"**{vch}** — from {', '.join(names)}: **{written:,}** bills, "
+            f"**{written - to_check:,}** filled and **{to_check:,}** red to check.")
+        st.download_button(
+            f"⬇️ Download {vch}_from_GST_Portal.xlsx", data=book,
+            file_name=f"{vch}_from_GST_Portal.xlsx", mime=XLSX_MIME,
+            type="primary", key=f"{gp_key}_dl_{vch}")
+    gp_notes = [n for n, c in gp_chosen.items() if c not in ("Purchase", "Sales")]
+    if gp_notes:
+        st.info("Credit / debit note sheets (" + ", ".join(gp_notes) + ") are "
+                "checked above but are not written to a file yet.")
     st.session_state["gp_ledger_map"] = gp_map
 
     st.stop()

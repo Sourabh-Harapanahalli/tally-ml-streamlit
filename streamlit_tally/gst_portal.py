@@ -11,6 +11,10 @@ A row belongs to the 5 / 12 / 18 / 28 group when its rate lands on one of
 those numbers; every other row (mixed-rate invoices, nil-rated, blanks) is
 flagged so it can be highlighted and dealt with by hand.
 
+A bill is taxed either with Integrated Tax (IGST) or with Central + State/UT
+Tax, never both: IGST bills go to the GST_<rate>_IGST group, the others to
+GST_<rate>. A row carrying both kinds of tax is flagged too.
+
 Pure pandas/openpyxl — no Streamlit — so it can be tested on its own.
 """
 
@@ -18,7 +22,7 @@ import io
 import re
 
 import pandas as pd
-from openpyxl import Workbook
+from openpyxl import Workbook, load_workbook
 from openpyxl.styles import Font, PatternFill
 from openpyxl.utils import get_column_letter
 
@@ -126,6 +130,11 @@ def _unique_headers(values):
     return out
 
 
+def group_name(rate, igst=False):
+    """Template column for a rate: GST_5, or GST_5_IGST for IGST bills."""
+    return f"GST_{rate}_IGST" if igst else f"GST_{rate}"
+
+
 def _match_rate(taxable, tax):
     """The 5/12/18/28 rate a row belongs to, or None."""
     if not taxable or taxable != taxable or tax != tax:
@@ -146,9 +155,11 @@ def classify_sheet(raw, header_row):
     * ``missing`` — tax headings not found on the header row (when non-empty
       nothing else is filled in: the header row is wrong for this sheet).
     * ``data`` — the sheet's rows with its own headings, indexed by Excel row
-      number, plus Tax_Total, Tax_Rate_% and GST_Group (GST_5 … GST_28, or
-      "Check" for rows that fit none of them).
-    * ``counts`` — {5: n, 12: n, 18: n, 28: n}.
+      number, plus Tax_Total, Tax_Rate_% and GST_Group (GST_5 … GST_28,
+      GST_5_IGST … GST_28_IGST, or "Check" for rows that fit none of them
+      or carry both IGST and Central/State tax).
+    * ``counts`` — rows per rate, {5: n, 12: n, 18: n, 28: n}.
+    * ``group_counts`` — rows per group, {"GST_5": n, "GST_5_IGST": n, …}.
     * ``unmatched`` — the Excel row numbers flagged "Check".
     """
     if header_row < 1 or header_row > len(raw):
@@ -167,18 +178,27 @@ def classify_sheet(raw, header_row):
         return pd.to_numeric(body.iloc[:, positions[key]], errors="coerce")
 
     taxable = number("taxable")
-    tax = sum(number(k).fillna(0) for k in ("igst", "cgst", "sgst"))
-    rates = [_match_rate(t, x) for t, x in zip(taxable.tolist(), tax.tolist())]
+    igst = number("igst").fillna(0)
+    local = number("cgst").fillna(0) + number("sgst").fillna(0)
+    tax = igst + local
+    # IGST and Central/State tax never go together: such a row fits no group.
+    rates = [None if i and c else _match_rate(t, x)
+             for t, x, i, c in zip(taxable.tolist(), tax.tolist(),
+                                   igst.tolist(), local.tolist())]
+    groups = [group_name(r, bool(i)) if r else NOT_MATCHED
+              for r, i in zip(rates, igst.tolist())]
 
     data["Tax_Total"] = tax.round(2).tolist()
     data["Tax_Rate_%"] = [
         round(x * 100 / t, 2) if t and t == t else None
         for t, x in zip(taxable.tolist(), tax.tolist())]
-    data["GST_Group"] = [f"GST_{r}" if r else NOT_MATCHED for r in rates]
+    data["GST_Group"] = groups
     return {
         "missing": [],
         "data": data,
         "counts": {r: rates.count(r) for r in GST_RATES},
+        "group_counts": {group_name(r, i): groups.count(group_name(r, i))
+                         for i in (False, True) for r in GST_RATES},
         "unmatched": [row for row, r in zip(data.index, rates) if r is None],
     }
 
@@ -210,3 +230,122 @@ def build_review_workbook(results):
     out = io.BytesIO()
     wb.save(out)
     return out.getvalue()
+
+
+# --------------------------------------------------------------------------
+# Portal rows  ->  the Purchase & Sales Bills template.
+# --------------------------------------------------------------------------
+# Bill details read from the portal sheet: normalised headings for each.
+BILL_COLUMNS = {
+    "number": ("Invoice number", ("invoicenumber", "notenumber")),
+    "date": ("Invoice Date", ("invoicedate", "notedate")),
+    "party": ("Trade/Legal name", ("tradelegalname", "legalname", "tradename")),
+    "value": ("Invoice Value", ("invoicevalue", "notevalue")),
+}
+_RED = PatternFill("solid", fgColor="F8B4B4")
+
+
+def find_bill_columns(columns):
+    """``(names, missing)`` — the sheet's own column name for each bill
+    detail, and the labels of the details it has no column for."""
+    names, missing = {}, []
+    for key, (label, wanted) in BILL_COLUMNS.items():
+        hit = next((c for c in columns if _norm(c) in wanted), None)
+        if hit is None:
+            missing.append(label)
+        else:
+            names[key] = hit
+    return names, missing
+
+
+def _date_text(value):
+    """A portal date as dd/mm/yyyy text (the portal already writes it so)."""
+    if _blank(value):
+        return ""
+    if hasattr(value, "strftime"):
+        return value.strftime("%d/%m/%Y")
+    return str(value).strip()
+
+
+def _amount(value):
+    number = pd.to_numeric(value, errors="coerce")
+    return None if number != number else round(float(number), 2)
+
+
+def template_rows(result, vch_type):
+    """Purchase & Sales template rows for one checked sheet.
+
+    Returns ``(rows, flags)``: ``rows`` are dicts keyed by template column,
+    ``flags`` says for each row whether it is a "Check" row. The taxable value
+    goes in the row's group column: GST_<rate> for a bill taxed with Central
+    + State/UT tax, GST_<rate>_IGST for one taxed with Integrated tax. "Check"
+    rows keep every GST column blank.
+    """
+    data = result["data"]
+    names, _ = find_bill_columns(data.columns)
+    tax_pos, _ = find_tax_columns(data.columns)
+    taxable_col = data.columns[tax_pos["taxable"]]
+
+    def cell(record, key):
+        return record[names[key]] if key in names else None
+
+    rows, flags = [], []
+    for record in data.to_dict("records"):
+        party = cell(record, "party")
+        party = "" if _blank(party) else str(party).strip()
+        number = cell(record, "number")
+        row = {
+            "Supplier_Invoice": "" if _blank(number) else str(number).strip(),
+            "Datetime": _date_text(cell(record, "date")),
+            "Vch_Type": vch_type,
+            "PartyLedgerName": party,
+            "Dr_LedgerName": party,
+            "Total_Amount": _amount(cell(record, "value")),
+        }
+        group = record["GST_Group"]
+        if group != NOT_MATCHED:
+            row[group] = _amount(record[taxable_col])
+        rows.append(row)
+        flags.append(group == NOT_MATCHED)
+    return rows, flags
+
+
+def build_template(parts, ledgers):
+    """A filled Purchase & Sales Bills workbook.
+
+    ``parts`` is a list of ``(classify_sheet result, Vch_Type)``; ``ledgers``
+    maps a group column (GST_5 … GST_28, GST_5_IGST … GST_28_IGST) to its
+    Tally ledger name, written on the MASTER_LEDGER_NAME_LINK sheet.
+    "Check" rows are filled red with their GST columns left blank.
+
+    Returns ``(workbook bytes, rows written, rows to check)``.
+    """
+    import tally_core  # here, not at the top: only this function needs it
+
+    wb = load_workbook(io.BytesIO(tally_core.template_purchase()))
+    ws = wb["TEMPLATE"]
+    headers = [c.value for c in ws[1]]
+    date_col = headers.index("Datetime") + 1
+    # Rows are placed by number, not appended: the blank template pre-formats
+    # thousands of empty rows, so an append would land below all of them.
+    written = to_check = 0
+    for result, vch_type in parts:
+        rows, flags = template_rows(result, vch_type)
+        for row, flagged in zip(rows, flags):
+            line = written + 2
+            for c, header in enumerate(headers, start=1):
+                target = ws.cell(line, c, row.get(header))
+                if flagged:
+                    target.fill = _RED
+            ws.cell(line, date_col).number_format = "@"
+            written += 1
+            to_check += flagged
+
+    link = wb["MASTER_LEDGER_NAME_LINK"]
+    for key_cell, name_cell in link.iter_rows(min_row=2, max_col=2):
+        if ledgers.get(key_cell.value):
+            name_cell.value = ledgers[key_cell.value]
+
+    out = io.BytesIO()
+    wb.save(out)
+    return out.getvalue(), written, to_check

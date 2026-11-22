@@ -135,20 +135,43 @@ def group_name(rate, igst=False):
     return f"GST_{rate}_IGST" if igst else f"GST_{rate}"
 
 
-def _match_rate(taxable, tax):
-    """The 5/12/18/28 rate a row belongs to, or None."""
-    if not taxable or taxable != taxable or tax != tax:
+_HALF_RATE = {5: "2.5", 12: "6", 18: "9", 28: "14"}
+
+
+def link_rows(igst=False, rates=GST_RATES):
+    """The MASTER_LEDGER_NAME_LINK rows a kind of bill needs, as a list of
+    ``(row title, [(link column, rate), …])``: for local bills the purchase /
+    sales ledger and the CGST and SGST tax ledgers of each rate, for
+    interstate bills the purchase / sales ledger and the IGST tax ledger."""
+    if igst:
+        return [
+            ("Purchase / sales ledger", [(group_name(r, True), r) for r in rates]),
+            ("IGST tax ledger", [(f"{r}_IGST", r) for r in rates]),
+        ]
+    return [
+        ("Purchase / sales ledger", [(group_name(r), r) for r in rates]),
+        ("CGST tax ledger", [(f"{_HALF_RATE[r]}_CGST", r) for r in rates]),
+        ("SGST tax ledger", [(f"{_HALF_RATE[r]}_SGST", r) for r in rates]),
+    ]
+
+
+def _match_rate(taxable, tax, rates=GST_RATES):
+    """The rate (one of ``rates``) a row belongs to, or None."""
+    if not rates or not taxable or taxable != taxable or tax != tax:
         return None
     rate = tax * 100 / taxable
-    best = min(GST_RATES, key=lambda r: abs(rate - r))
+    best = min(rates, key=lambda r: abs(rate - r))
     if (abs(rate - best) <= RATE_TOLERANCE_PCT
             or abs(tax - taxable * best / 100) <= RATE_TOLERANCE_RUPEES):
         return best
     return None
 
 
-def classify_sheet(raw, header_row):
+def classify_sheet(raw, header_row, rates=GST_RATES):
     """Work out the GST group of every data row under ``header_row`` (1-based).
+
+    ``rates`` are the GST rates that apply; a row at any other rate — also
+    one of 5/12/18/28 that was left out — is a "Check" row.
 
     Returns a dict:
 
@@ -182,7 +205,7 @@ def classify_sheet(raw, header_row):
     local = number("cgst").fillna(0) + number("sgst").fillna(0)
     tax = igst + local
     # IGST and Central/State tax never go together: such a row fits no group.
-    rates = [None if i and c else _match_rate(t, x)
+    rates = [None if i and c else _match_rate(t, x, rates)
              for t, x, i, c in zip(taxable.tolist(), tax.tolist(),
                                    igst.tolist(), local.tolist())]
     groups = [group_name(r, bool(i)) if r else NOT_MATCHED
@@ -314,8 +337,8 @@ def build_template(parts, ledgers):
     """A filled Purchase & Sales Bills workbook.
 
     ``parts`` is a list of ``(classify_sheet result, Vch_Type)``; ``ledgers``
-    maps a group column (GST_5 … GST_28, GST_5_IGST … GST_28_IGST) to its
-    Tally ledger name, written on the MASTER_LEDGER_NAME_LINK sheet.
+    maps a MASTER_LEDGER_NAME_LINK column (GST_5, GST_5_IGST, 2.5_CGST,
+    2.5_SGST, 5_IGST, …) to its Tally ledger name, written on that sheet.
     "Check" rows are filled red with their GST columns left blank.
 
     Returns ``(workbook bytes, rows written, rows to check)``.

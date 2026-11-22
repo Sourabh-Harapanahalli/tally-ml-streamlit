@@ -21,6 +21,7 @@ import pandas as pd
 from openpyxl import Workbook, load_workbook
 from openpyxl.styles import Alignment, Border, PatternFill, Side
 from openpyxl.utils import get_column_letter
+from openpyxl.worksheet.datavalidation import DataValidation
 
 
 # ==========================================================================
@@ -145,6 +146,32 @@ def _force_text_columns(wb, sheet_name, headers, n_rows=5000):
     return wb
 
 
+# The voucher types the Purchase / Sales converter can post.
+PURCHASE_SALES_VCH_TYPES = ('Purchase', 'Sales')
+
+
+def _add_dropdown(wb, sheet_name, header, choices):
+    """Give every cell under ``header`` a fixed drop-down of ``choices``.
+
+    Typing anything else is refused by Excel. Pasting is not checked by Excel
+    (a paste replaces the cell together with its rule), so copied rows still
+    go in as they are.
+    """
+    ws = wb[sheet_name]
+    column = next((c.column_letter for c in ws[1] if c.value == header), None)
+    if column is None:
+        return
+    rule = DataValidation(type='list', formula1='"' + ','.join(choices) + '"',
+                          allow_blank=True, showErrorMessage=True)
+    rule.errorTitle = header
+    rule.error = 'Choose one of: ' + ', '.join(choices)
+    rule.promptTitle = header
+    rule.prompt = 'Pick from the list: ' + ', '.join(choices)
+    rule.showInputMessage = True
+    ws.add_data_validation(rule)
+    rule.add(f'{column}2:{column}{ws.max_row if ws.max_row > 5001 else 5001}')
+
+
 def template_purchase():
     template = pd.DataFrame(columns=(
         'Supplier_Invoice', 'Datetime', 'Vch_Type', 'PartyLedgerName',
@@ -165,6 +192,7 @@ def template_purchase():
     _style_widths(wb)
     # Keep pasted dd/mm/yyyy dates literal (no Excel mm/dd auto-conversion).
     _force_text_columns(wb, 'TEMPLATE', ['Datetime'])
+    _add_dropdown(wb, 'TEMPLATE', 'Vch_Type', PURCHASE_SALES_VCH_TYPES)
     out = BytesIO()
     wb.save(out)
     return out.getvalue()

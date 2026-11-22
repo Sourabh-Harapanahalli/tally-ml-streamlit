@@ -601,6 +601,69 @@ PS_LEDGER_COLUMNS = ["PartyLedgerName", "Dr_LedgerName"]
 PCR_LEDGER_COLUMNS = ["PartyLedgerName", "Dr_LedgerName", "Cr_LedgerName"]
 
 
+# Purchase / Sales also posts to ledgers that are not on the TEMPLATE sheet:
+# the purchase/sales and tax ledgers named on the MASTER_LEDGER_NAME_LINK
+# sheet, and a ledger the converter presumes exists for rounding differences.
+PS_LINK_SHEET = "MASTER_LEDGER_NAME_LINK"
+PS_ROUND_OFF_LEDGER = "ROUND OFF"
+# TEMPLATE GST column -> (tax rate %, the link-sheet rows its vouchers use).
+PS_GST_LINKS = {
+    "GST_5": (5, ("GST_5", "2.5_CGST", "2.5_SGST")),
+    "GST_12": (12, ("GST_12", "6_CGST", "6_SGST")),
+    "GST_18": (18, ("GST_18", "9_CGST", "9_SGST")),
+    "GST_28": (28, ("GST_28", "14_CGST", "14_SGST")),
+    "GST_5_IGST": (5, ("GST_5_IGST", "5_IGST")),
+    "GST_12_IGST": (12, ("GST_12_IGST", "12_IGST")),
+    "GST_18_IGST": (18, ("GST_18_IGST", "18_IGST")),
+    "GST_28_IGST": (28, ("GST_28_IGST", "28_IGST")),
+}
+
+
+@st.cache_data(show_spinner=False)
+def ps_link_check(file_bytes):
+    """What the Purchase / Sales file needs beyond its TEMPLATE ledger columns.
+
+    Returns ``(link_names, blank_needed, round_off_needed)``:
+
+    * ``link_names`` — {link-sheet row: ledger name} for the rows filled in.
+    * ``blank_needed`` — link-sheet rows left blank although the TEMPLATE
+      sheet has amounts in their GST column (their vouchers would be posted
+      to a ledger with no name).
+    * ``round_off_needed`` — True when a bill's total differs from its
+      taxable value + tax, which the converter posts to the ROUND OFF ledger.
+    """
+    sheets = pd.read_excel(io.BytesIO(file_bytes), sheet_name=None)
+    data = sheets.get("TEMPLATE", pd.DataFrame())
+    link = sheets.get(PS_LINK_SHEET)
+    link_names = {}
+    if link is not None and link.shape[1] >= 2:
+        for key, name in zip(link.iloc[:, 0], link.iloc[:, 1]):
+            name = "" if pd.isna(name) else str(name).strip()
+            if not pd.isna(key) and name:
+                link_names[str(key).strip()] = name
+
+    blank_needed = []
+    computed = pd.Series(0.0, index=data.index)
+    for column, (rate, rows) in PS_GST_LINKS.items():
+        if column not in data.columns:
+            continue
+        amount = pd.to_numeric(data[column], errors="coerce")
+        if amount.fillna(0).ne(0).any():
+            blank_needed += [r for r in rows if r not in link_names]
+        amount = amount.fillna(0).round(2)
+        if column.endswith("_IGST"):
+            tax = (amount * rate / 100).round(2)
+        else:                      # CGST and SGST, each rounded on its own
+            tax = (amount * rate / 200).round(2) * 2
+        computed += amount + tax
+    round_off_needed = False
+    if "Total_Amount" in data.columns:
+        total = pd.to_numeric(data["Total_Amount"], errors="coerce")
+        diff = (total.round(0) - computed.round(2)).abs()
+        round_off_needed = bool((diff[total.notna()] >= 0.005).any())
+    return link_names, blank_needed, round_off_needed
+
+
 def fetch_tally_ledger_names(conn_str):
     """Return the list of ledger names from a running Tally instance (ODBC)."""
     df = run_odbc_query(conn_str, "SELECT $Name FROM Ledger")
@@ -883,11 +946,13 @@ def closest_ledger_names(name, tally_names, n=6):
     return [cand for _score, cand in scored[:n]]
 
 
-def apply_ledger_corrections(file_bytes, corrections, columns=PS_LEDGER_COLUMNS):
+def apply_ledger_corrections(file_bytes, corrections, columns=PS_LEDGER_COLUMNS,
+                             link_sheet=False):
     """Return new .xlsx bytes with the given ledger columns' cells renamed.
 
-    Only the named ledger columns on the TEMPLATE sheet are touched; everything
-    else (including any MASTER_LEDGER_NAME_LINK sheet) is preserved verbatim.
+    Only the named ledger columns on the TEMPLATE sheet are touched — plus,
+    with ``link_sheet``, the ledger names on the MASTER_LEDGER_NAME_LINK
+    sheet. Everything else is preserved verbatim.
     """
     wb = load_workbook(io.BytesIO(file_bytes))
     ws = wb["TEMPLATE"]
@@ -900,6 +965,11 @@ def apply_ledger_corrections(file_bytes, corrections, columns=PS_LEDGER_COLUMNS)
                 key = str(cell.value).strip() if cell.value is not None else ""
                 if key in corrections:
                     cell.value = corrections[key]
+    if link_sheet and PS_LINK_SHEET in wb.sheetnames:
+        for (cell,) in wb[PS_LINK_SHEET].iter_rows(min_row=2, min_col=2, max_col=2):
+            key = str(cell.value).strip() if cell.value is not None else ""
+            if key in corrections:
+                cell.value = corrections[key]
     out = io.BytesIO()
     wb.save(out)
     return out.getvalue()
@@ -947,12 +1017,16 @@ def date_range_ui(key_prefix):
     return True, date_from, date_to
 
 
-def ledger_check_ui(file_bytes, columns, key_prefix, columns_label):
+def ledger_check_ui(file_bytes, columns, key_prefix, columns_label,
+                    ps_extras=False):
     """Verify a converter's ledger names against Tally (ODBC), before conversion.
 
     ``columns`` are the TEMPLATE columns to validate, ``key_prefix`` namespaces
     the Streamlit widget/session keys so multiple converters don't collide, and
     ``columns_label`` is the human-readable list shown in the expander header.
+    ``ps_extras`` (Purchase / Sales) also checks the ledger names on the
+    MASTER_LEDGER_NAME_LINK sheet and the ROUND OFF ledger the converter
+    presumes exists.
 
     Returns ``(convert_bytes, blocked)``:
 
@@ -1011,6 +1085,40 @@ def ledger_check_ui(file_bytes, columns, key_prefix, columns_label):
         tally_set = set(tally_names)
         used = collect_ledger_names(file_bytes, columns)
 
+        # Purchase / Sales: the link-sheet names are checked (and fixed) like
+        # the TEMPLATE ones; a blank link row or a missing ROUND OFF ledger
+        # cannot be fixed here, so it is reported as a problem.
+        origins, problems = {}, []
+        if ps_extras:
+            link_names, blank_needed, round_off_needed = ps_link_check(file_bytes)
+            for row, name in link_names.items():
+                origins.setdefault(name, []).append(row)
+            used = sorted(set(used) | set(origins))
+            if blank_needed:
+                problems.append(
+                    f"The **{PS_LINK_SHEET}** sheet has no ledger name for "
+                    f"**{', '.join(blank_needed)}**, but the TEMPLATE sheet has "
+                    "amounts in those GST columns. Fill the names in and upload "
+                    "the file again.")
+            if PS_ROUND_OFF_LEDGER not in tally_set:
+                alike = [n for n in tally_names
+                         if _norm_name(n) == _norm_name(PS_ROUND_OFF_LEDGER)]
+                hint = (f" Tally has `{alike[0]}` — the name must match exactly."
+                        if alike else "")
+                if round_off_needed:
+                    problems.append(
+                        f"Tally has no ledger named **{PS_ROUND_OFF_LEDGER}**. "
+                        "The converter posts rounding differences to it, and "
+                        "this file has bills whose total differs from taxable "
+                        f"value + tax. Create the ledger in Tally, then fetch "
+                        f"again.{hint}")
+                else:
+                    st.warning(
+                        f"Tally has no ledger named **{PS_ROUND_OFF_LEDGER}**. "
+                        "This file does not need it (every bill total matches "
+                        "its taxable value + tax), but the converter posts "
+                        f"rounding differences to that ledger.{hint}")
+
         unresolved = []
         for name in used:
             effective = corrections.get(name, name)
@@ -1025,11 +1133,15 @@ def ledger_check_ui(file_bytes, columns, key_prefix, columns_label):
             st.caption(f"✏️ {len(corrections)} fix(es) staged — they'll be applied "
                        "to the file before conversion.")
 
-        if not unresolved:
+        if not unresolved and not problems:
             st.success("✅ All ledger names match Tally — converting below.")
-            corrected = (apply_ledger_corrections(file_bytes, corrections, columns)
+            corrected = (apply_ledger_corrections(file_bytes, corrections, columns,
+                                                  ps_extras)
                          if corrections else convert_bytes)
             return corrected, False
+
+        for problem in problems:
+            st.error(problem)
 
         # Offer a one-click "apply all suggestions" for names that have one.
         fixable = [u for u in unresolved if u[2]]
@@ -1039,14 +1151,17 @@ def ledger_check_ui(file_bytes, columns, key_prefix, columns_label):
                 corrections[name] = sugg[0]
             st.rerun()
 
-        st.warning(f"⚠️ **{len(unresolved)}** ledger name(s) don't match Tally. "
-                   f"Pick the right ledger (search across all {len(tally_names)} "
-                   "Tally ledgers) and click Fix.")
+        if unresolved:
+            st.warning(f"⚠️ **{len(unresolved)}** ledger name(s) don't match Tally. "
+                       f"Pick the right ledger (search across all {len(tally_names)} "
+                       "Tally ledgers) and click Fix.")
 
         sorted_names = sorted(tally_names, key=str.lower)
         for i, (name, effective, suggestions) in enumerate(unresolved):
             shown = name if effective == name else f"{name}  →  {effective}"
-            st.markdown(f"❌ `{shown}` — pick the correct ledger:")
+            where = (f" ({PS_LINK_SHEET}: {', '.join(origins[name])})"
+                     if name in origins else "")
+            st.markdown(f"❌ `{shown}`{where} — pick the correct ledger:")
 
             # Suggestions first (best match pre-selected), then every other
             # ledger, all in their original Tally case.
@@ -1077,26 +1192,28 @@ def ledger_check_ui(file_bytes, columns, key_prefix, columns_label):
                 st.rerun()
 
         # Apply whatever has been staged so far so partial fixes still take effect.
-        convert_bytes = (apply_ledger_corrections(file_bytes, corrections, columns)
+        convert_bytes = (apply_ledger_corrections(file_bytes, corrections, columns,
+                                                  ps_extras)
                          if corrections else file_bytes)
 
         # Conversion stays paused while names are unresolved, unless the user
         # explicitly opts to convert anyway (e.g. ledgers created later in Tally).
         convert_anyway = st.checkbox(
-            "Convert anyway, ignoring the unmatched names above",
+            "Convert anyway, ignoring the problems above",
             key=f"{key_prefix}_chk_convert_anyway")
         if not convert_anyway:
-            st.info("⏸️ Conversion is paused until every name is fixed "
+            st.info("⏸️ Conversion is paused until everything above is fixed "
                     "(or tick “Convert anyway”).")
 
     return convert_bytes, (not convert_anyway)
 
 
 def ps_ledger_check_ui(file_bytes):
-    """Ledger-name check for Purchase / Sales (PartyLedgerName / Dr_LedgerName)."""
+    """Ledger-name check for Purchase / Sales: PartyLedgerName / Dr_LedgerName,
+    the MASTER_LEDGER_NAME_LINK names and the ROUND OFF ledger."""
     return ledger_check_ui(
         file_bytes, PS_LEDGER_COLUMNS, "ps",
-        "PartyLedgerName / Dr_LedgerName")
+        "PartyLedgerName / Dr_LedgerName and the GST ledgers", ps_extras=True)
 
 
 def pcr_ledger_check_ui(file_bytes):

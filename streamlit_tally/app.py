@@ -23,12 +23,14 @@ from datetime import date
 import pandas as pd
 import streamlit as st
 from openpyxl import load_workbook
+from openpyxl.utils import get_column_letter
 from streamlit.runtime.scriptrunner import add_script_run_ctx, get_script_run_ctx
 
 import tally_core
 import bank_pdf
 import excel_compare
 import excel_merge
+import gst_portal
 import gstr1_json
 import marg_dbf
 import marg_xml
@@ -241,6 +243,7 @@ ERROR_LOG_TOOL = "Tally Error Log Viewer"
 MARG_MASTER_TOOL = "MARG Master (Tally Export)"
 MARG_VOUCHER_TOOL = "MARG Voucher (Tally Export)"
 MARG_LEDGER_TOOL = "MARG Ledger DBF → Master — Ledger"
+GST_PORTAL_TOOL = "GST Portal Excel → Purchase / Sales"
 
 
 @st.cache_data(show_spinner=False)
@@ -1412,7 +1415,7 @@ def restart_button(state_key, check_prefix=None):
 # --------------------------------------------------------------------------
 # Sidebar sections, in the order they appear in the menu and on Home.
 TOOL_SECTIONS = {
-    "Excel to Tally": list(TOOLS.keys()) + [BANK_PDF_TOOL,
+    "Excel to Tally": list(TOOLS.keys()) + [GST_PORTAL_TOOL, BANK_PDF_TOOL,
                                                 ERROR_LOG_TOOL],
     "Tally to Excel": [MASTER_XML_TOOL, ODBC_TOOL],
     "Marg to Tally": [MARG_MASTER_TOOL, MARG_VOUCHER_TOOL,
@@ -1467,6 +1470,13 @@ TOOL_META = {
         "icon": "🏷️",
         "desc": "Create purchase and sales ledgers with their GST rates.",
         "tags": "gst rate ledger xml"},
+    GST_PORTAL_TOOL: {
+        "title": "GST Portal Bills (GSTR-2B)",
+        "icon": "🧮",
+        "desc": "Turn the Excel downloaded from the GST portal into the "
+                "Purchase & Sales Bills format, sorted by GST rate.",
+        "tags": "gst portal gstr2b 2b b2b cdnr credit debit note purchase "
+                "sales itc rate ledger"},
     BANK_PDF_TOOL: {
         "title": "Bank Statement (PDF)",
         "icon": "🏦",
@@ -2773,6 +2783,225 @@ if tool_name == MASTER_XML_TOOL:
             except Exception as exc:  # noqa: BLE001
                 st.error(f"Conversion failed: {exc}")
                 st.exception(exc)
+
+    st.stop()
+
+# ==========================================================================
+# GST portal Excel (GSTR-2B: B2B, B2B-CDNR, …)  ->  Purchase & Sales format.
+# So far: header row, what each sheet becomes, GST-rate grouping of every
+# row, and the Tally ledger for each rate. The template itself comes next.
+# ==========================================================================
+@st.cache_data(show_spinner=False)
+def gp_load_sheets(file_bytes):
+    return gst_portal.load_sheets(file_bytes)
+
+
+@st.cache_data(show_spinner=False)
+def gp_classify(file_bytes, sheet, header_row):
+    return gst_portal.classify_sheet(gp_load_sheets(file_bytes)[sheet], header_row)
+
+
+@st.cache_data(show_spinner=False)
+def gp_review_workbook(file_bytes, sheets, header_row):
+    return gst_portal.build_review_workbook(
+        {s: gp_classify(file_bytes, s, header_row) for s in sheets})
+
+
+if tool_name == GST_PORTAL_TOOL:
+    ui.page_header(GST_PORTAL_TOOL, TOOL_META, SECTION_OF.get(GST_PORTAL_TOOL, ""))
+    st.info(
+        "Upload the Excel you downloaded from the **GST portal** (for example "
+        "GSTR-2B). Each sheet you pick — **B2B**, **B2B-CDNR**, … — is sorted "
+        "into the **5 / 12 / 18 / 28 %** GST groups and matched to your Tally "
+        "ledgers, ready for the Purchase & Sales Bills format."
+    )
+
+    ui.step("Step 1 — Upload the Excel from the GST portal")
+    gp_file = st.file_uploader(
+        "Upload the GST portal Excel", type=["xlsx", "xlsm"],
+        key=f"uploader_gst_portal_{uploader_nonce('gp')}")
+    if gp_file is None:
+        st.stop()
+    restart_button("gp")
+
+    gp_bytes = gp_file.getvalue()
+    try:
+        gp_sheets = gp_load_sheets(gp_bytes)
+    except Exception as exc:  # noqa: BLE001
+        st.error(f"Could not read this Excel file: {exc}")
+        st.stop()
+    gp_filled = [n for n, raw in gp_sheets.items() if not raw.empty]
+    if not gp_filled:
+        st.error("This Excel file has no data in any sheet.")
+        st.stop()
+    # Widget keys carry the file's signature, so a new file starts from its
+    # own defaults instead of the previous file's answers.
+    gp_key = f"gp_{uploader_nonce('gp')}_{file_signature(gp_bytes)[:10]}"
+
+    # ---- Step 2: the header row ------------------------------------------
+    ui.step("Step 2 — Which row has the column headings?")
+    st.info(
+        "Each sheet must have its column headings on **one row only**. If the "
+        "headings are spread over two or more rows (grouped or merged "
+        "headings), open the file in Excel, bring them into a single row, "
+        "save it and upload it again."
+    )
+    gp_detected = {n: gst_portal.detect_header_row(gp_sheets[n]) for n in gp_filled}
+    gp_first_hit = next((n for n in gp_filled if gp_detected[n]), gp_filled[0])
+    c_row, c_sheet = st.columns([1, 2])
+    gp_header_row = int(c_row.number_input(
+        "Header row number (as in Excel)", min_value=1, max_value=1000,
+        value=gp_detected[gp_first_hit] or 1, step=1, key=f"{gp_key}_header",
+        help="The same row is used for every sheet you convert."))
+    gp_peek = c_sheet.selectbox(
+        "Preview the top of sheet", gp_filled,
+        index=gp_filled.index(gp_first_hit), key=f"{gp_key}_peek")
+    gp_top = gp_sheets[gp_peek].head(max(8, gp_header_row + 4)).fillna("").astype(str)
+    gp_top.index = range(1, len(gp_top) + 1)
+    gp_top.columns = [get_column_letter(i + 1) for i in range(gp_top.shape[1])]
+    st.dataframe(
+        gp_top.style.apply(
+            lambda r: ["background-color: #dcdefa; font-weight: 600"
+                       if r.name == gp_header_row else ""] * len(r), axis=1),
+        use_container_width=True)
+    st.caption(f"Row **{gp_header_row}** (shaded) is read as the headings; "
+               "the bills start on the row below it.")
+
+    # ---- Step 3: what each sheet becomes ---------------------------------
+    ui.step("Step 3 — Choose what each sheet becomes")
+    gp_chosen, gp_bad = {}, []
+    for n in gp_sheets:
+        c_name, c_pick, c_note = st.columns([3, 3, 4], vertical_alignment="center")
+        if n not in gp_filled:
+            c_name.markdown(f"**{n}**")
+            c_note.caption("Empty sheet — nothing to convert.")
+            continue
+        rows = gst_portal.data_row_count(gp_sheets[n], gp_header_row)
+        c_name.markdown(f"**{n}**  \n:gray[{rows:,} rows]")
+        choice = c_pick.selectbox(
+            f"Convert {n} as", gst_portal.CONVERSIONS,
+            index=gst_portal.CONVERSIONS.index(gst_portal.suggest_conversion(n)),
+            key=f"{gp_key}_conv_{n}", label_visibility="collapsed")
+        if choice == gst_portal.SKIP:
+            c_note.caption("Left out.")
+            continue
+        missing = gp_classify(gp_bytes, n, gp_header_row)["missing"]
+        if missing:
+            gp_bad.append(n)
+            c_note.error(f"Row {gp_header_row} has no heading for: "
+                         + ", ".join(missing))
+        else:
+            gp_chosen[n] = choice
+            c_note.success("Headings found.")
+
+    if gp_bad:
+        st.warning(
+            "Fix the sheets marked in red before going on: check the header "
+            "row in Step 2, and that the sheet has a single row of headings. "
+            "Or set them to “Don't convert”.")
+        st.stop()
+    if not gp_chosen:
+        st.info("Choose at least one sheet to convert.")
+        st.stop()
+
+    # ---- Step 4: GST rate of every row -----------------------------------
+    ui.step("Step 4 — Sort the bills into GST rates")
+    st.caption(
+        "GST rate = (Integrated Tax + Central Tax + State/UT Tax) × 100 ÷ "
+        "Taxable Value. A bill that lands on 5, 12, 18 or 28 goes into that "
+        "group. Bills that land anywhere else are highlighted for you to check.")
+    gp_results = {n: gp_classify(gp_bytes, n, gp_header_row) for n in gp_chosen}
+    for n, result in gp_results.items():
+        st.markdown(f"**{n}** → {gp_chosen[n]}")
+        cols = st.columns(len(gst_portal.GST_RATES) + 1)
+        for col, rate in zip(cols, gst_portal.GST_RATES):
+            col.metric(f"GST {rate}%", f"{result['counts'][rate]:,}")
+        flagged = result["unmatched"]
+        cols[-1].metric("To check", f"{len(flagged):,}")
+        if flagged:
+            with st.expander(f"⚠️ {len(flagged):,} highlighted rows in {n} — "
+                             "not 5, 12, 18 or 28 %"):
+                shown = result["data"].loc[flagged[:500]]
+                lead = gst_portal.ADDED_COLUMNS
+                shown = shown[lead + [c for c in shown.columns if c not in lead]]
+                st.dataframe(
+                    shown.fillna("").astype(str).style.apply(
+                        lambda r: ["background-color: #fff2a8"] * len(r), axis=1),
+                    use_container_width=True)
+                note = "The row numbers are the rows in the portal Excel."
+                if len(flagged) > 500:
+                    note += f" Showing the first 500 of {len(flagged):,}."
+                st.caption(note)
+    with st.spinner("Preparing the checked Excel…"):
+        gp_review = gp_review_workbook(gp_bytes, tuple(gp_chosen), gp_header_row)
+    st.download_button(
+        "⬇️ Download the checked Excel (rows to check highlighted)",
+        data=gp_review, file_name="GST_Portal_Rate_Check.xlsx", mime=XLSX_MIME,
+        key=f"{gp_key}_review")
+
+    # ---- Step 5: Tally ledger for each rate ------------------------------
+    ui.step("Step 5 — Pick the Tally ledger for each GST rate")
+    st.caption("Connect to the Tally company that is open on this computer, "
+               "then pick the ledger the bills of each GST rate are posted to.")
+    with st.expander("🔌 Tally connection", expanded="gp_tally_ledgers" not in st.session_state):
+        gp_conn = odbc_connection_form("gp")
+        st.caption(f"Connection string: `{gp_conn}`")
+        if st.button("🔍 Get the ledger list from Tally", key="gp_fetch"):
+            try:
+                with st.spinner("Reading ledgers from Tally…"):
+                    st.session_state["gp_tally_ledgers"] = sorted(
+                        set(fetch_tally_ledger_names(gp_conn)), key=str.lower)
+                if not st.session_state["gp_tally_ledgers"]:
+                    st.warning("Connected, but Tally returned no ledgers.")
+            except ImportError:
+                st.error("`pyodbc` is not installed. Run `pip install pyodbc`.")
+            except Exception as exc:  # noqa: BLE001
+                st.session_state.pop("gp_tally_ledgers", None)
+                st.error(f"Could not get the ledgers from Tally: {exc}")
+                st.caption(
+                    "Check that Tally is open with ODBC enabled and the port "
+                    "matches, and that the driver name / DSN and bitness are right.")
+        gp_manual = st.checkbox(
+            "Tally is not on this computer — type the ledger names instead",
+            key="gp_manual")
+
+    gp_ledgers = st.session_state.get("gp_tally_ledgers")
+    if gp_ledgers:
+        st.caption(f"✅ {len(gp_ledgers):,} ledgers loaded from Tally.")
+    elif not gp_manual:
+        st.info("⏸️ Get the ledger list from Tally above to continue.")
+        st.stop()
+
+    gp_map, gp_unset = {}, []
+    for side in sorted({gst_portal.ledger_side(c) for c in gp_chosen.values()}):
+        st.markdown(f"**{side} ledgers**")
+        used = {rate: sum(gp_results[n]["counts"][rate] for n, c in gp_chosen.items()
+                          if gst_portal.ledger_side(c) == side)
+                for rate in gst_portal.GST_RATES}
+        for col, rate in zip(st.columns(len(gst_portal.GST_RATES)), gst_portal.GST_RATES):
+            # The label stays fixed: a label that changes resets the choice.
+            label = f"GST {rate}%"
+            key = f"gp_ledger_{side}_{rate}"
+            if gp_ledgers:
+                picked = col.selectbox(label, gp_ledgers, index=None, key=key,
+                                       placeholder="Choose a ledger")
+            else:
+                picked = col.text_input(label, key=f"{key}_typed",
+                                        placeholder="Exact Tally ledger name").strip()
+            col.caption(f"{used[rate]:,} rows" if used[rate] else "Not used in this file")
+            gp_map[(side, rate)] = picked or ""
+            if used[rate] and not picked:
+                gp_unset.append(f"{side} {rate}%")
+
+    if gp_unset:
+        st.warning("Still to pick: " + ", ".join(gp_unset) + ".")
+    else:
+        st.success("Every GST rate in use has a Tally ledger.")
+        st.dataframe(
+            pd.DataFrame([{"Bills": side, "GST rate": f"{rate}%", "Tally ledger": name}
+                          for (side, rate), name in gp_map.items() if name]),
+            use_container_width=True, hide_index=True)
+    st.session_state["gp_ledger_map"] = gp_map
 
     st.stop()
 

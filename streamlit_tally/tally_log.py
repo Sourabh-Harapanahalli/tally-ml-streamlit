@@ -7,7 +7,9 @@ Import Summary with counts. This module turns that text into a list of import
 runs, each with its errors and a plain-language hint. No Streamlit.
 """
 
+import os
 import re
+import time
 from datetime import datetime
 
 DEFAULT_LOG_PATH = r"C:\Program Files\Tally\Tally.ERP9\tally.imp"
@@ -51,6 +53,64 @@ _HINTS = [
     (r"already exists",
      "A ledger with this name already exists in the Tally company."),
 ]
+
+
+def _read_shared_windows(path):
+    """Read a file another Windows program holds open, or None if it can't.
+
+    Python's ``open`` fails with "Permission denied" when the other program
+    (Tally, while it is running) opened the file in a way the default sharing
+    mode doesn't accept. Asking Windows for read access while allowing every
+    kind of sharing gets through in that case.
+    """
+    if os.name != "nt":
+        return None
+    try:
+        import ctypes
+        import msvcrt
+        from ctypes import wintypes
+
+        kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+        kernel32.CreateFileW.restype = wintypes.HANDLE
+        kernel32.CreateFileW.argtypes = [
+            wintypes.LPCWSTR, wintypes.DWORD, wintypes.DWORD, wintypes.LPVOID,
+            wintypes.DWORD, wintypes.DWORD, wintypes.HANDLE]
+        kernel32.CloseHandle.argtypes = [wintypes.HANDLE]
+        generic_read, share_all, open_existing, normal = 0x80000000, 0x7, 3, 0x80
+        handle = kernel32.CreateFileW(path, generic_read, share_all, None,
+                                      open_existing, normal, None)
+        if handle is None or handle == wintypes.HANDLE(-1).value:
+            return None
+        try:
+            fd = msvcrt.open_osfhandle(handle, os.O_RDONLY)
+        except OSError:
+            kernel32.CloseHandle(handle)
+            return None
+        with os.fdopen(fd, "rb") as fh:
+            return fh.read()
+    except Exception:  # noqa: BLE001 - a fallback must never raise
+        return None
+
+
+def read_log_file(path, attempts=3, wait=0.4):
+    """The log file's bytes.
+
+    Tally keeps ``tally.imp`` open while it runs and writes to it during an
+    import, so a plain read can be refused. This retries a few times and, on
+    Windows, also tries a read that shares the file with Tally. Raises the
+    original ``PermissionError`` if every attempt is refused.
+    """
+    for attempt in range(attempts):
+        try:
+            with open(path, "rb") as fh:
+                return fh.read()
+        except PermissionError:
+            data = _read_shared_windows(path)
+            if data is not None:
+                return data
+            if attempt == attempts - 1:
+                raise
+            time.sleep(wait)
 
 
 def decode_log(raw_bytes):

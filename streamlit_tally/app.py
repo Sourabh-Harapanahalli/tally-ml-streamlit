@@ -1703,13 +1703,24 @@ if tool_name == ERROR_LOG_TOOL:
     else:
         path = log_path.strip().strip('"')
         try:
-            with open(path, "rb") as fh:
-                log_bytes, log_source = fh.read(), path
+            log_bytes, log_source = tally_log.read_log_file(path), path
         except FileNotFoundError:
             st.warning(
                 f"No log file at `{path}`. Check the path, or upload the "
                 "file above. The path only works when this app runs on the "
                 "same computer as Tally.")
+        except PermissionError:
+            st.error(
+                f"Windows would not let this app read `{path}`. Tally is most "
+                "likely holding the file while it is open or importing.")
+            st.markdown(
+                "Try one of these, then click **Reload**:\n"
+                "- Wait for the import to finish and leave Tally's import "
+                "screen.\n"
+                "- Close Tally, reload this page, then open Tally again.\n"
+                "- Copy `tally.imp` to your Desktop and upload the copy above.\n"
+                "- If none of these work, close this app and start "
+                "`start.bat` with **Run as administrator**.")
         except OSError as exc:
             st.error(f"Could not read `{path}`: {exc}")
     if log_bytes is None:

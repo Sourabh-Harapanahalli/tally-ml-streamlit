@@ -1840,37 +1840,146 @@ def marg_tally_export_prerequisites():
     )
 
 
+def _marg_outputs(books):
+    """(workbooks, Tally XML files, XML failures, zip of both) for download."""
+    xmls, failures = marg_xml.tally_xml_files(books)
+    return books, xmls, failures, marg_xml.bundle_zip(books, xmls)
+
+
 @st.cache_data(show_spinner=False)
 def marg_masters_from_xml(file_bytes, standard_groups):
-    """Masters XML -> (parsed tables, {file name: xlsx bytes}), cached."""
+    """Masters XML -> (parsed tables, download files), cached."""
     parsed = marg_xml.parse_masters(marg_xml.decode_xml(file_bytes),
                                     standard_groups=standard_groups)
-    return parsed, marg_xml.master_workbooks(parsed)
+    return parsed, _marg_outputs(marg_xml.master_workbooks(parsed))
 
 
 @st.cache_data(show_spinner=False)
 def marg_vouchers_from_xml(file_bytes):
-    """Daybook XML -> (converted tables, {file name: xlsx bytes}), cached."""
-    converted = marg_xml.convert_vouchers(
+    """Daybook XML -> converted tables, cached."""
+    return marg_xml.convert_vouchers(
         marg_xml.parse_vouchers(marg_xml.decode_xml(file_bytes)))
-    return converted, marg_xml.voucher_workbooks(converted)
 
 
-def marg_workbook_downloads(books, zip_name, key_prefix):
-    """One download button per workbook, plus everything as a .zip."""
+@st.cache_data(show_spinner=False)
+def marg_voucher_outputs(file_bytes, confirmed):
+    """Download files for the daybook, cached per set of confirmed names.
+
+    ``confirmed`` is a tuple of (file key, link row, ledger name) the user
+    approved for link-sheet rows the vouchers do not use.
+    """
+    names = {}
+    for key, row, name in confirmed:
+        names.setdefault(key, {})[row] = name
+    converted = marg_vouchers_from_xml(file_bytes)
+    return _marg_outputs(marg_xml.voucher_workbooks(converted, names))
+
+
+def marg_link_names_ui(converted, file_sig):
+    """Show the link-sheet names and let the user approve names for unused rows.
+
+    Names read from the vouchers are shown as they are. Rows no voucher uses
+    are blank in the files; a suggested name is only written once the user
+    ticks it (or types their own) and presses Apply. Returns the approved
+    names as a tuple of (file key, link row, ledger name).
+    """
+    state_key = f"marg_links_ok_{file_sig}"
+    ui.step("Step 5 — Check the GST ledger names")
+    st.caption(
+        "Sales.xlsx and Purchase.xlsx each carry a `MASTER_LEDGER_NAME_LINK` "
+        "sheet that names the Tally ledger for every GST column. Only names "
+        "found in your Marg vouchers are filled in.")
+    present = [(key, label) for key, label in (("sales", "Sales"),
+                                               ("purchase", "Purchase"))
+               if not converted[key].empty]
+    if not present:
+        st.caption("No bills went into the Purchase & Sales template, so "
+                   "there is no link sheet to fill.")
+        return ()
+    with st.form(f"marg_links_form_{file_sig}", border=False):
+        edited = {}
+        for tab, (key, label) in zip(st.tabs([f"{label}.xlsx" for _, label in present]),
+                                     present):
+            found = converted[key + "_links"]
+            guesses = converted[key + "_suggestions"]
+            with tab:
+                st.markdown(f"**Found in your Marg vouchers** — {len(found)} row(s)")
+                st.dataframe(
+                    pd.DataFrame(
+                        [{"Link row": r, "Ledger name": found[r]}
+                         for r in marg_xml.LINK_ROWS if r in found]),
+                    use_container_width=True, hide_index=True)
+                if not guesses:
+                    continue
+                st.markdown(
+                    f"**Not used by your vouchers** — {len(guesses)} row(s), "
+                    "left blank in the files")
+                st.caption(
+                    "The suggested names follow Marg's usual naming. They are "
+                    "guesses and may not exist in your company — tick a row, "
+                    "or type your own name, only if you want it written.")
+                approved = dict(
+                    (r, n) for k, r, n in st.session_state.get(state_key, ())
+                    if k == key)
+                edited[key] = st.data_editor(
+                    pd.DataFrame(
+                        [{"Link row": r,
+                          "Suggested name": guesses[r],
+                          "Use suggestion": approved.get(r) == guesses[r],
+                          "Or type a name": (approved.get(r, "")
+                                             if approved.get(r) != guesses[r] else "")}
+                         for r in marg_xml.LINK_ROWS if r in guesses]),
+                    key=f"marg_links_{key}_{file_sig}", hide_index=True,
+                    use_container_width=True,
+                    disabled=["Link row", "Suggested name"],
+                    column_config={
+                        "Use suggestion": st.column_config.CheckboxColumn(width="small"),
+                        "Or type a name": st.column_config.TextColumn()})
+        if st.form_submit_button("Apply to the files", type="primary"):
+            chosen = []
+            for key, table in edited.items():
+                for row in table.to_dict("records"):
+                    typed = str(row["Or type a name"] or "").strip()
+                    name = typed or (row["Suggested name"]
+                                     if row["Use suggestion"] else "")
+                    if name:
+                        chosen.append((key, row["Link row"], name))
+            st.session_state[state_key] = tuple(chosen)
+    confirmed = st.session_state.get(state_key, ())
+    if confirmed:
+        st.success(
+            f"{len(confirmed)} name(s) you approved are written to the link "
+            "sheet: " + ", ".join(f"`{r}` → {n}" for _, r, n in confirmed))
+    return confirmed
+
+
+def marg_downloads(outputs, zip_name, key_prefix):
+    """Excel and Tally XML side by side for each file, then one .zip of all.
+
+    The .zip holds the workbooks in an ``Excel`` folder and the Tally files
+    in an ``XML`` folder.
+    """
+    books, xmls, failures, bundle = outputs
+    left, right = st.columns(2)
+    left.markdown("**Excel** — to review or edit")
+    right.markdown("**Tally XML** — ready to import")
     for name, data in books.items():
-        st.download_button(f"⬇️ {name}", data=data, file_name=name,
-                           mime=XLSX_MIME, key=f"{key_prefix}_{name}",
-                           use_container_width=True)
-    if len(books) > 1:
-        buf = io.BytesIO()
-        with zipfile.ZipFile(buf, "w", zipfile.ZIP_DEFLATED) as zf:
-            for name, data in books.items():
-                zf.writestr(name, data)
-        st.download_button("⬇️ Download all (.zip)", data=buf.getvalue(),
-                           file_name=zip_name, mime="application/zip",
-                           key=f"{key_prefix}_zip", type="primary",
-                           use_container_width=True)
+        xml_name = name.rsplit(".", 1)[0] + ".xml"
+        left, right = st.columns(2)
+        left.download_button(f"⬇️ {name}", data=data, file_name=name,
+                             mime=XLSX_MIME, key=f"{key_prefix}_{name}",
+                             use_container_width=True)
+        if xml_name in xmls:
+            right.download_button(
+                f"⬇️ {xml_name}", data=xmls[xml_name], file_name=xml_name,
+                mime="application/xml", key=f"{key_prefix}_{xml_name}",
+                use_container_width=True)
+        elif xml_name in failures:
+            right.error(f"Could not build {xml_name}: {failures[xml_name]}")
+    st.download_button(
+        "📦 Download everything (.zip — Excel and XML folders)", data=bundle,
+        file_name=zip_name, mime="application/zip", key=f"{key_prefix}_zip",
+        type="primary", use_container_width=True)
 
 
 def marg_tally_export_footer():
@@ -1939,7 +2048,7 @@ if tool_name == MARG_MASTER_TOOL:
                  "(SUPPLIERS). Standard moves each ledger up to the Tally "
                  "group above it, which already exists in every company.")
         try:
-            parsed, books = marg_masters_from_xml(
+            parsed, outputs = marg_masters_from_xml(
                 masters_file.getvalue(), group_style == "Standard Tally groups")
         except marg_xml.MargXmlError as exc:
             st.error(str(exc))
@@ -1971,11 +2080,13 @@ if tool_name == MARG_MASTER_TOOL:
             "'Kept'. The same list is on the REVIEW sheet of "
             "Master_Ledger.xlsx.")
 
-        marg_workbook_downloads(books, "Marg_Masters.zip", "marg_master_dl")
+        marg_downloads(outputs, "Marg_Masters.zip", "marg_master_dl")
         st.caption(
-            "Each file matches the template of the tool with the same name "
-            "under **Excel to Tally** — upload it there to get the "
-            "Tally XML.")
+            "The XML files are the Excel files run through this app's own "
+            "converters, ready to import into Tally. To change anything "
+            "first, edit the Excel and upload it to the matching tool under "
+            "**Excel to Tally**, which also runs the duplicate-GST and Tally "
+            "ledger checks.")
 
     st.divider()
     st.subheader("If something goes wrong")
@@ -2068,8 +2179,7 @@ should match.
     if daybook_file is not None:
         try:
             with st.spinner("Reading vouchers…"):
-                converted, books = marg_vouchers_from_xml(
-                    daybook_file.getvalue())
+                converted = marg_vouchers_from_xml(daybook_file.getvalue())
         except marg_xml.MargXmlError as exc:
             st.error(str(exc))
             st.stop()
@@ -2082,8 +2192,7 @@ should match.
 - **Sales.xlsx / Purchase.xlsx** — Purchase / Sales template. A bill is put
   here only when the template can reproduce it exactly. Sales and purchases
   are separate files because each needs its own ledger names on the
-  `MASTER_LEDGER_NAME_LINK` sheet, which is already filled in with Marg's
-  ledgers.
+  `MASTER_LEDGER_NAME_LINK` sheet — see Step 5 below.
 - **Pay_Con_Rec.xlsx** — Payment / Contra / Receipt template.
 - **Other_Vouchers.xlsx** — everything else (journals, credit notes, returns,
   and bills the Purchase / Sales template can't hold), as plain Dr/Cr rows in
@@ -2112,11 +2221,23 @@ should match.
             "split into several rows, and why. The same list is on the "
             "REVIEW sheet of Pay_Con_Rec.xlsx and Other_Vouchers.xlsx.")
 
-        marg_workbook_downloads(books, "Marg_Vouchers.zip", "marg_voucher_dl")
+        st.divider()
+        confirmed_links = marg_link_names_ui(
+            converted, file_signature(daybook_file.getvalue())[:12])
+
+        st.divider()
+        ui.step("Step 6 — Download")
+        with st.spinner("Building the Excel and Tally XML files…"):
+            outputs = marg_voucher_outputs(daybook_file.getvalue(),
+                                           confirmed_links)
+        marg_downloads(outputs, "Marg_Vouchers.zip", "marg_voucher_dl")
         st.caption(
-            "Upload Sales.xlsx and Purchase.xlsx in **Purchase & Sales Bills**, "
-            "and the other two in **Payments & Receipts**, under **Excel to "
-            "Tally**, to get the Tally XML.")
+            "The XML files are the Excel files run through this app's own "
+            "converters. In Sales.xml and Purchase.xml, the empty ledger "
+            "lines the converter writes for blank link rows are left out. To "
+            "change anything, edit the Excel and upload Sales.xlsx and Purchase.xlsx in "
+            "**Purchase & Sales Bills**, and the other two in **Payments & "
+            "Receipts**, under **Excel to Tally**.")
 
     marg_tally_export_footer()
     st.stop()
@@ -2247,22 +2368,22 @@ export rights first: **Masters > Marg Setups > Control Room**, search
 
     st.dataframe(ledger_df, use_container_width=True, hide_index=True)
 
-    marg_xlsx = ledgers_to_excel(ledger_df.to_dict("records"))
     base_name = os.path.splitext(dbf_file.name)[0]
-    d1, d2 = st.columns(2)
-    d1.download_button(
-        "⬇️ Download Excel (Master — Ledger format)", data=marg_xlsx,
-        file_name=f"Master_Ledger_from_{base_name}.xlsx", mime=XLSX_MIME,
-        use_container_width=True)
+    ledger_xlsx = ledgers_to_excel(ledger_df.to_dict("records"))
+    ledger_files = {f"Master_Ledger_from_{base_name}.xlsx": ledger_xlsx}
     try:
-        marg_xml = tally_core.result_xml_bytes(
-            tally_core.convert_master_ledger(io.BytesIO(marg_xlsx)))
-        d2.download_button(
-            "⬇️ Download Tally XML", data=marg_xml,
-            file_name=f"Master_Ledger_from_{base_name}.xml",
-            mime="application/xml", use_container_width=True)
+        ledger_xmls = {f"Master_Ledger_from_{base_name}.xml":
+                       tally_core.result_xml_bytes(
+                           tally_core.convert_master_ledger(
+                               io.BytesIO(ledger_xlsx)))}
+        ledger_failures = {}
     except Exception as exc:  # noqa: BLE001
-        d2.error(f"Could not build the Tally XML: {exc}")
+        ledger_xmls = {}
+        ledger_failures = {f"Master_Ledger_from_{base_name}.xml": str(exc)}
+    marg_downloads(
+        (ledger_files, ledger_xmls, ledger_failures,
+         marg_xml.bundle_zip(ledger_files, ledger_xmls)),
+        f"Marg_Ledgers_{base_name}.zip", "marg_dbf_dl")
     st.caption(
         "To run the duplicate-GST and Tally ledger checks first, download the "
         "Excel and upload it in **Excel to Tally → Ledgers**.")

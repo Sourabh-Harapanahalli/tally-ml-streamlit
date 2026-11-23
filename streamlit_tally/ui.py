@@ -150,9 +150,11 @@ h3 { font-weight: 700; }
 [data-testid="stMain"] button[data-testid$="-primary"]:hover {
   background: #4f53c8; box-shadow: 0 2px 4px rgba(28, 32, 51, .10), 0 10px 22px rgba(91, 95, 214, .26);
 }
-[data-testid="stMain"] .stDownloadButton button {
+[data-testid="stMain"] .stDownloadButton button:not([kind="primary"]):not([data-testid$="-primary"]) {
   background: #fff; border-color: var(--tm-line);
 }
+[data-testid="stMain"] button[kind="primary"] p,
+[data-testid="stMain"] button[data-testid$="-primary"] p { color: #fff; }
 
 /* ---- Inputs, uploads, tables ---------------------------------------- */
 [data-testid="stFileUploaderDropzone"] {

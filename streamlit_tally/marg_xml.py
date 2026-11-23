@@ -429,8 +429,21 @@ def _dr_cr_rows(voucher):
     return rows
 
 
-def _default_links(side):
-    """Marg's standard ledger names for every MASTER_LEDGER_NAME_LINK row."""
+# MASTER_LEDGER_NAME_LINK rows, in the order the template lists them.
+LINK_ROWS = (
+    [f"GST_{r}" for r in GST_RATES] + [f"GST_{r}_IGST" for r in GST_RATES]
+    + [f"{_fmt_rate(r / 2)}_CGST" for r in GST_RATES]
+    + [f"{_fmt_rate(r / 2)}_SGST" for r in GST_RATES]
+    + [f"{r}_IGST" for r in GST_RATES])
+
+
+def suggested_links(side):
+    """Ledger names that follow Marg's usual naming, one per link row.
+
+    These are guesses, not data: a name here may not exist in the company.
+    They are only ever offered on screen and are written to a file solely
+    for the rows the user confirms.
+    """
     word = "SALES" if side == "Sales" else "PURCHASE"
     links = {}
     for rate in GST_RATES:
@@ -448,7 +461,10 @@ def convert_vouchers(vouchers):
 
     Returns a dict:
       ``sales`` / ``purchase``  rows for the Purchase / Sales template,
-      ``sales_links`` / ``purchase_links``  its MASTER_LEDGER_NAME_LINK values,
+      ``sales_links`` / ``purchase_links``  MASTER_LEDGER_NAME_LINK names
+          found in the vouchers (rows no bill uses are absent),
+      ``sales_suggestions`` / ``purchase_suggestions``  guessed names for
+          those unused rows — for display only, never written by default,
       ``pcr``    Payment / Receipt / Contra rows,
       ``other``  every other voucher as Dr/Cr rows (same layout as ``pcr``),
       ``review`` what was moved, split or left out, and why,
@@ -517,9 +533,10 @@ def convert_vouchers(vouchers):
     for kind, key in (("Sales", "sales"), ("Purchase", "purchase")):
         # One link sheet per workbook: a column can name only one ledger, so
         # the commonest ledger wins and any bill using another is moved out.
-        links = _default_links(kind)
-        links.update({col: votes.most_common(1)[0][0]
-                      for col, votes in link_votes[kind].items()})
+        # Only ledgers that really occur in the vouchers; rows no bill uses
+        # stay blank rather than being filled with a made-up name.
+        links = {col: votes.most_common(1)[0][0]
+                 for col, votes in link_votes[kind].items()}
         kept = []
         for row, names in ps_rows[kind]:
             clash = next((c for c, n in names.items() if links[c] != n), None)
@@ -533,6 +550,9 @@ def convert_vouchers(vouchers):
                 summary[(kind, "Purchase / Sales")] += 1
         result[key] = pd.DataFrame(kept, columns=PS_COLUMNS)
         result[key + "_links"] = links
+        result[key + "_suggestions"] = {
+            row: name for row, name in suggested_links(kind).items()
+            if row not in links}
 
     result["pcr"] = pd.DataFrame(pcr_rows, columns=PCR_COLUMNS)
     result["other"] = pd.DataFrame(other_rows, columns=PCR_COLUMNS)
@@ -593,15 +613,24 @@ def master_workbooks(parsed):
     return books
 
 
-def voucher_workbooks(converted):
-    """{file name: xlsx bytes} for the vouchers, skipping empty templates."""
+def voucher_workbooks(converted, confirmed=None):
+    """{file name: xlsx bytes} for the vouchers, skipping empty templates.
+
+    ``confirmed`` is {"sales": {link row: name}, "purchase": {...}} — names
+    the user has approved for link rows the vouchers do not use. Without it
+    those rows are left blank. A confirmed name never replaces one that was
+    read from the vouchers.
+    """
     review = converted["review"]
+    confirmed = confirmed or {}
     books = {}
     for key, name in (("sales", "Sales.xlsx"), ("purchase", "Purchase.xlsx")):
         if not converted[key].empty:
+            links = {row: text for row, text in confirmed.get(key, {}).items()
+                     if text and row in LINK_ROWS}
+            links.update(converted[key + "_links"])
             books[name] = fill_template(
-                tally_core.template_purchase(), converted[key],
-                links=converted[key + "_links"])
+                tally_core.template_purchase(), converted[key], links=links)
     if not converted["pcr"].empty:
         books["Pay_Con_Rec.xlsx"] = fill_template(
             tally_core.template_pay_con_rec(), converted["pcr"],
@@ -611,3 +640,86 @@ def voucher_workbooks(converted):
             tally_core.template_pay_con_rec(), converted["other"],
             review=review[review["Placed_In"] != "Payment / Contra / Receipt"])
     return books
+
+
+# --------------------------------------------------------------------------
+# Tally XML — each workbook run through this app's own converter.
+# --------------------------------------------------------------------------
+_CONVERTERS = {
+    "Master_Ledger.xlsx": tally_core.convert_master_ledger,
+    "Master_Duties_Taxes.xlsx": tally_core.convert_master_duties,
+    "Master_Purchase_Sales_Ledgers.xlsx": tally_core.convert_master_ps,
+    "Sales.xlsx": tally_core.convert_purchase_sales,
+    "Purchase.xlsx": tally_core.convert_purchase_sales,
+    "Pay_Con_Rec.xlsx": tally_core.convert_pay_con_rec,
+    "Other_Vouchers.xlsx": tally_core.convert_pay_con_rec,
+}
+
+
+_ENTRY_OPEN, _ENTRY_CLOSE = "<ALLLEDGERENTRIES.LIST>", "</ALLLEDGERENTRIES.LIST>"
+_EMPTY_AMOUNT_RE = re.compile(r"<AMOUNT>\s*[+-]?\s*</AMOUNT>")
+
+
+def drop_blank_link_entries(xml_text):
+    """Remove the ledger lines the converter writes for blank link rows.
+
+    The Purchase / Sales converter adds one line per MASTER_LEDGER_NAME_LINK
+    row to every voucher. For a blank row that line names a ledger called
+    "nan" and has no amount. Such a ledger does not exist, so the line is
+    dropped; nothing with an amount is touched. Returns (xml, lines removed).
+    """
+    parts, pos, removed = [], 0, 0
+    while True:
+        start = xml_text.find(_ENTRY_OPEN, pos)
+        if start < 0:
+            break
+        end = xml_text.find(_ENTRY_CLOSE, start)
+        if end < 0:
+            break
+        end += len(_ENTRY_CLOSE)
+        block = xml_text[start:end]
+        if ("<LEDGERNAME>nan</LEDGERNAME>" in block
+                and _EMPTY_AMOUNT_RE.search(block)):
+            parts.append(xml_text[pos:start].rstrip(" \t"))
+            removed += 1
+        else:
+            parts.append(xml_text[pos:end])
+        pos = end
+    parts.append(xml_text[pos:])
+    return "".join(parts), removed
+
+
+def tally_xml_files(books):
+    """Convert each workbook to Tally XML with the matching converter.
+
+    Returns ({'Sales.xml': bytes, …}, {'Sales.xml': 'why it failed', …}).
+    The XML is what uploading the workbook to its tool would give, except
+    that Sales/Purchase vouchers do not carry the empty "nan" ledger lines
+    the converter writes for blank link rows (see drop_blank_link_entries).
+    """
+    xmls, failures = {}, {}
+    for name, data in books.items():
+        convert = _CONVERTERS.get(name)
+        if convert is None:
+            continue
+        xml_name = name.rsplit(".", 1)[0] + ".xml"
+        try:
+            xml = tally_core.result_xml_bytes(convert(io.BytesIO(data)))
+            if convert is tally_core.convert_purchase_sales:
+                xml = drop_blank_link_entries(xml.decode("utf-8"))[0].encode("utf-8")
+            xmls[xml_name] = xml
+        except Exception as exc:  # noqa: BLE001 - report, keep the others
+            failures[xml_name] = f"{type(exc).__name__}: {exc}"
+    return xmls, failures
+
+
+def bundle_zip(books, xmls):
+    """One .zip with the workbooks under Excel/ and the Tally files under XML/."""
+    import zipfile
+    buf = io.BytesIO()
+    with zipfile.ZipFile(buf, "w", zipfile.ZIP_DEFLATED) as zf:
+        for name, data in books.items():
+            zf.writestr(f"Excel/{name}", data)
+        for name, data in xmls.items():
+            zf.writestr(f"XML/{name}", data)
+    return buf.getvalue()

@@ -2319,12 +2319,16 @@ if tool_name == MARG_SUMMARY_TOOL:
 
     st.divider()
     ui.step("Step 2 — Monthly summaries")
-    t_types, t_gst, t_ledger = st.tabs(
-        ["By voucher type", "GST by month", "Ledger monthly summary"])
+    t_types, t_gst, t_round, t_ledger = st.tabs(
+        ["By voucher type", "GST by month", "Round off",
+         "Ledger monthly summary"])
 
     with t_types:
-        st.caption("Total amount of each voucher type per month. A voucher's "
-                   "amount is the total of its credit side.")
+        st.caption(
+            "Total amount of each voucher type per month. For bills, "
+            "returns, credit notes and journals this is the invoice total — "
+            "the amount posted to the party. For payments and receipts it "
+            "is the amount paid or received.")
         amount = (by_type.pivot_table(index="Month", columns="Vch_Type",
                                       values="Amount", aggfunc="sum",
                                       fill_value=0, sort=False)
@@ -2353,10 +2357,11 @@ if tool_name == MARG_SUMMARY_TOOL:
 
     with t_gst:
         st.caption(
-            "Value and tax per month. Tax is what Marg posted to ledgers "
-            "with CGST, SGST or IGST in their name; Value is the rest of the "
-            "voucher total. Round off is shown separately and is part of "
-            "Value.")
+            "Value + CGST + SGST + IGST + Round off = Total, for every row. "
+            "Tax is what Marg posted to ledgers with CGST, SGST or IGST in "
+            "their name. For bills placed in Sales.xlsx or Purchase.xlsx, "
+            "Total matches the `Total_Amount` column and Value matches the "
+            "sum of the `GST_` columns.")
         gst = summaries["gst"]
         kinds = list(gst["Vch_Type"].unique())
         chosen_kind = st.selectbox(
@@ -2372,6 +2377,66 @@ if tool_name == MARG_SUMMARY_TOOL:
             .style.format({c: ("{:,.0f}" if c == "Vouchers" else "{:,.2f}")
                            for c in numeric}),
             use_container_width=True, hide_index=True)
+
+    with t_round:
+        st.caption(
+            "How much Marg rounded each month. **Actual amount** is the bill "
+            "value before rounding (goods + tax). **Billed amount** is what "
+            "the customer or supplier was charged after rounding — the "
+            "figure carried into the Excel and Tally files. "
+            "Actual + Rounded up − Rounded down = Billed.")
+        rounding = summaries["round_off"]
+        if rounding.empty:
+            st.caption("No bills in this file.")
+        else:
+            r_kinds = list(rounding["Vch_Type"].unique())
+            r_kind = st.selectbox(
+                "Voucher type", r_kinds,
+                index=r_kinds.index("Sales") if "Sales" in r_kinds else 0,
+                key="marg_sum_round_type")
+            r_one = rounding[rounding["Vch_Type"] == r_kind].drop(columns="Vch_Type")
+            r_numeric = [c for c in r_one.columns if c != "Month"]
+            r_total = r_one[r_numeric].sum()
+            r_total["Month"] = "Total"
+            r_table = pd.concat([r_one, r_total.to_frame().T], ignore_index=True)
+            # What Marg's GST Summary screen shows as Invoice Value: it adds
+            # the round-ups but does not take off the round-downs.
+            r_table["Marg_GST_Summary_Value"] = (
+                r_table["Before_Round_Off"] + r_table["Rounded_Up"])
+            c1, c2, c3, c4 = st.columns(4)
+            c1.metric("Actual amount", f"{r_total['Before_Round_Off']:,.2f}")
+            c2.metric("Rounded up", f"+{r_total['Rounded_Up']:,.2f}",
+                      help=f"{int(r_total['Bills_Rounded_Up'])} bill(s)")
+            c3.metric("Rounded down", f"−{r_total['Rounded_Down']:,.2f}",
+                      help=f"{int(r_total['Bills_Rounded_Down'])} bill(s)")
+            c4.metric("Billed amount", f"{r_total['Billed_Amount']:,.2f}")
+            counts = {"Vouchers", "Bills_Rounded_Up", "Bills_Rounded_Down"}
+            st.dataframe(
+                r_table.rename(columns={
+                    "Vouchers": "Bills",
+                    "Before_Round_Off": "Actual amount",
+                    "Bills_Rounded_Up": "Bills rounded up",
+                    "Rounded_Up": "Rounded up (+)",
+                    "Bills_Rounded_Down": "Bills rounded down",
+                    "Rounded_Down": "Rounded down (−)",
+                    "Net_Round_Off": "Net round off",
+                    "Billed_Amount": "Billed amount",
+                    "Marg_GST_Summary_Value": "As on Marg GST Summary"})
+                .style.format({
+                    "Bills": "{:,.0f}", "Bills rounded up": "{:,.0f}",
+                    "Bills rounded down": "{:,.0f}",
+                    "Actual amount": "{:,.2f}", "Rounded up (+)": "{:,.2f}",
+                    "Rounded down (−)": "{:,.2f}", "Net round off": "{:,.2f}",
+                    "Billed amount": "{:,.2f}",
+                    "As on Marg GST Summary": "{:,.2f}"}),
+                use_container_width=True, hide_index=True)
+            st.caption(
+                "**As on Marg GST Summary** is Actual amount + Rounded up. "
+                "Marg's GST Summary screen shows this as *Invoice Value*: it "
+                "adds the round-ups but does not take off the round-downs, "
+                "so it is higher than the billed amount by the rounded-down "
+                "total. This is worked out from the exported vouchers and "
+                "can differ from Marg's screen by a few paise.")
 
     with t_ledger:
         st.caption(
@@ -2411,7 +2476,8 @@ if tool_name == MARG_SUMMARY_TOOL:
         data=marg_xml.summaries_workbook(summaries, openings),
         file_name="Marg_Monthly_Summary.xlsx", mime=XLSX_MIME, type="primary")
     st.caption("One sheet each for the month × voucher type table, vouchers "
-               "by month, GST by month and every ledger by month.")
+               "by month, GST by month, round off by month and every ledger "
+               "by month.")
 
     with st.expander("🔎  Where to find the same figures in Tally.ERP 9"):
         st.markdown(

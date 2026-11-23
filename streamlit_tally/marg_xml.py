@@ -732,6 +732,9 @@ BY_TYPE_COLUMNS = ["Month", "Vch_Type", "Vouchers", "Amount"]
 GST_COLUMNS = ["Month", "Vch_Type", "Vouchers", "Value", "CGST", "SGST",
                "IGST", "Round_Off", "Total"]
 LEDGER_MONTH_COLUMNS = ["Ledger", "Month", "Debit", "Credit"]
+ROUND_OFF_COLUMNS = ["Month", "Vch_Type", "Vouchers", "Before_Round_Off",
+                     "Bills_Rounded_Up", "Rounded_Up", "Bills_Rounded_Down",
+                     "Rounded_Down", "Net_Round_Off", "Billed_Amount"]
 NO_DATE = "No date"
 
 
@@ -749,11 +752,17 @@ def monthly_summaries(vouchers):
 
     Returns a dict of DataFrames, each sorted by calendar month:
 
-    * ``by_type`` — vouchers and amount per month and voucher type. A
-      voucher's amount is the total of its credit lines (= its debit lines).
-    * ``gst`` — the same rows split into value, CGST, SGST, IGST and round
-      off. Tax is whatever Marg posted to ledgers with CGST / SGST / IGST in
-      their name; value is the remainder.
+    * ``by_type`` — vouchers and amount per month and voucher type. For a
+      bill, return, credit/debit note or journal the amount is what was
+      posted to the party (the invoice total). For cash and bank vouchers
+      (Payment, Receipt, Contra) it is the voucher total.
+    * ``gst`` — the same rows split so that
+      Value + CGST + SGST + IGST + Round_Off = Total. Tax is whatever Marg
+      posted to ledgers with CGST / SGST / IGST in their name; round off is
+      signed (negative when it reduces the bill).
+    * ``round_off`` — for bills and other party vouchers: the amount before
+      rounding, how much Marg rounded up and down (and on how many bills),
+      and the amount billed. Before + Rounded_Up - Rounded_Down = Billed.
     * ``ledger`` — debit and credit per ledger per month, as posted by Marg.
     * ``months`` — the month labels in calendar order.
     """
@@ -761,21 +770,48 @@ def monthly_summaries(vouchers):
     for voucher in vouchers:
         sort_key, month = _month_key(voucher["date"])
         order[month] = sort_key
-        total = sum(a for _, a in voucher["entries"] if a > 0)
+        entries = voucher["entries"]
+        party_net = sum(a for n, a in entries if n == voucher["party"])
+        # Measure a bill from the party's side: what the party owes (or is
+        # owed) is the invoice total, and every other line is a part of it.
+        # Summing one side of the voucher instead would count a round-off
+        # posted on the party's side twice.
+        from_party = voucher["type"] not in PCR_TYPES and abs(party_net) > 0.005
+        if from_party:
+            sign = 1 if party_net < 0 else -1
+            total = abs(party_net)
+        else:
+            sign = 0
+            total = sum(a for _, a in entries if a > 0)
         key = (month, voucher["type"])
         by_type[key + ("n",)] += 1
         by_type[key + ("amount",)] += total
         parts = gst.setdefault(key, Counter())
         parts["Vouchers"] += 1
         parts["Total"] += total
-        for name, amount in voucher["entries"]:
+        party_left = from_party
+        rounded = 0.0
+        for name, amount in entries:
             slot = ledger.setdefault((name, month), [0.0, 0.0])
             slot[0 if amount < 0 else 1] += abs(amount)
+            if party_left and name == voucher["party"]:
+                continue
+            part = amount * sign if from_party else abs(amount)
             kind = _tax_kind(name)
             if kind:
-                parts[kind] += abs(amount)
+                parts[kind] += part
             elif _is_round_off(name):
-                parts["Round_Off"] += abs(amount)
+                parts["Round_Off"] += part
+                rounded += part
+        if from_party:
+            parts["Party_Vouchers"] += 1
+            parts["Party_Total"] += total
+            if rounded > 0.004:
+                parts["Up_Bills"] += 1
+                parts["Up"] += rounded
+            elif rounded < -0.004:
+                parts["Down_Bills"] += 1
+                parts["Down"] += -rounded
 
     def sort_months(df):
         if df.empty:
@@ -793,17 +829,34 @@ def monthly_summaries(vouchers):
         tax = parts["CGST"] + parts["SGST"] + parts["IGST"]
         gst_rows.append({
             "Month": month, "Vch_Type": kind, "Vouchers": parts["Vouchers"],
-            "Value": round(parts["Total"] - tax, 2),
+            "Value": round(parts["Total"] - tax - parts["Round_Off"], 2),
             "CGST": round(parts["CGST"], 2), "SGST": round(parts["SGST"], 2),
             "IGST": round(parts["IGST"], 2),
             "Round_Off": round(parts["Round_Off"], 2),
             "Total": round(parts["Total"], 2)})
+    round_rows = []
+    for (month, kind), parts in gst.items():
+        if not parts["Party_Vouchers"]:
+            continue
+        net = parts["Up"] - parts["Down"]
+        round_rows.append({
+            "Month": month, "Vch_Type": kind,
+            "Vouchers": parts["Party_Vouchers"],
+            "Before_Round_Off": round(parts["Party_Total"] - net, 2),
+            "Bills_Rounded_Up": parts["Up_Bills"],
+            "Rounded_Up": round(parts["Up"], 2),
+            "Bills_Rounded_Down": parts["Down_Bills"],
+            "Rounded_Down": round(parts["Down"], 2),
+            "Net_Round_Off": round(net, 2),
+            "Billed_Amount": round(parts["Party_Total"], 2)})
     ledger_rows = [{"Ledger": name, "Month": month,
                     "Debit": round(dr, 2), "Credit": round(cr, 2)}
                    for (name, month), (dr, cr) in ledger.items()]
     return {
         "by_type": sort_months(pd.DataFrame(type_rows, columns=BY_TYPE_COLUMNS)),
         "gst": sort_months(pd.DataFrame(gst_rows, columns=GST_COLUMNS)),
+        "round_off": sort_months(pd.DataFrame(round_rows,
+                                              columns=ROUND_OFF_COLUMNS)),
         "ledger": sort_months(pd.DataFrame(ledger_rows,
                                            columns=LEDGER_MONTH_COLUMNS)),
         "months": sorted(order, key=order.get),
@@ -860,6 +913,7 @@ def summaries_workbook(summaries, openings=None):
         month_type.to_excel(writer, sheet_name="Month x Voucher type", index=False)
         summaries["by_type"].to_excel(writer, sheet_name="Vouchers by month", index=False)
         summaries["gst"].to_excel(writer, sheet_name="GST by month", index=False)
+        summaries["round_off"].to_excel(writer, sheet_name="Round off by month", index=False)
         ledger.to_excel(writer, sheet_name="Ledgers by month", index=False)
         if openings:
             pd.DataFrame(

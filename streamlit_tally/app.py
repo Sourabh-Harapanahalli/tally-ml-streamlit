@@ -243,6 +243,7 @@ ERROR_LOG_TOOL = "Tally Error Log Viewer"
 MARG_MASTER_TOOL = "MARG Master (Tally Export)"
 MARG_VOUCHER_TOOL = "MARG Voucher (Tally Export)"
 MARG_LEDGER_TOOL = "MARG Ledger DBF → Master — Ledger"
+MARG_SUMMARY_TOOL = "MARG Monthly Summary"
 GST_PORTAL_TOOL = "GST Portal Excel → Purchase / Sales"
 
 
@@ -1536,7 +1537,7 @@ TOOL_SECTIONS = {
                                                 ERROR_LOG_TOOL],
     "Tally to Excel": [MASTER_XML_TOOL, ODBC_TOOL],
     "Marg to Tally": [MARG_MASTER_TOOL, MARG_VOUCHER_TOOL,
-                                MARG_LEDGER_TOOL],
+                                MARG_LEDGER_TOOL, MARG_SUMMARY_TOOL],
     "Excel & GST Tools": [CONSOLIDATE_TOOL, GSTR1_JSON_TOOL, COMPARE_TOOL],
 }
 SECTION_NOTES = {
@@ -1635,6 +1636,13 @@ TOOL_META = {
         "desc": "Convert Marg's ledger export (.dbf) into the Master — "
                 "Ledger Excel format.",
         "tags": "marg erp dbf ledger master"},
+    MARG_SUMMARY_TOOL: {
+        "title": "Marg Monthly Summary",
+        "icon": "📅",
+        "desc": "Month-by-month totals from Marg, to check against Tally "
+                "after you move the books.",
+        "tags": "marg erp monthly summary month total sales purchase ledger "
+                "balance verify reconcile daybook"},
     CONSOLIDATE_TOOL: {
         "title": "Merge Excel Files",
         "icon": "🧩",
@@ -2240,6 +2248,189 @@ should match.
             "Receipts**, under **Excel to Tally**.")
 
     marg_tally_export_footer()
+    st.stop()
+
+
+# ==========================================================================
+# Marg monthly summary: month-by-month totals of the daybook, to compare with
+# Tally after a migration.
+# ==========================================================================
+@st.cache_data(show_spinner=False)
+def marg_monthly_summaries(file_bytes):
+    """Daybook XML -> monthly summary tables, cached."""
+    return marg_xml.monthly_summaries(
+        marg_xml.parse_vouchers(marg_xml.decode_xml(file_bytes)))
+
+
+@st.cache_data(show_spinner=False)
+def marg_opening_balances(file_bytes):
+    """Masters XML -> {ledger: opening balance, debit positive}, cached."""
+    return marg_xml.opening_balances(marg_xml.decode_xml(file_bytes))
+
+
+if tool_name == MARG_SUMMARY_TOOL:
+    ui.page_header(MARG_SUMMARY_TOOL, TOOL_META, SECTION_OF.get(MARG_SUMMARY_TOOL, ""))
+    st.info(
+        "Upload the **daybook** file from Marg's Tally Export to see its "
+        "totals month by month — by voucher type, by GST, and for any "
+        "ledger. Use it to check that Tally shows the same figures after "
+        "the import.")
+
+    ui.step("Step 1 — Upload the Marg files")
+    u1, u2 = st.columns(2)
+    summary_daybook = u1.file_uploader(
+        "Daybook XML (vouchers)", type=["xml"], key="uploader_marg_sum_daybook")
+    summary_masters = u2.file_uploader(
+        "Masters XML (optional — adds opening and closing balances)",
+        type=["xml"], key="uploader_marg_sum_masters")
+    if summary_daybook is None:
+        st.caption("Both files come from Marg's Tally Export — see **Marg "
+                   "Masters** and **Marg Vouchers** for how to export them.")
+        st.stop()
+
+    try:
+        with st.spinner("Adding up the vouchers…"):
+            summaries = marg_monthly_summaries(summary_daybook.getvalue())
+    except marg_xml.MargXmlError:
+        st.error("That file has no vouchers in it. Put the **daybook** file "
+                 "in the first box; the masters file goes in the second.")
+        st.stop()
+    openings = None
+    if summary_masters is not None:
+        openings = marg_opening_balances(summary_masters.getvalue())
+        if not openings:
+            st.warning("No ledgers found in the masters file, so opening and "
+                       "closing balances are not shown.")
+            openings = None
+
+    by_type, months = summaries["by_type"], summaries["months"]
+    type_totals = by_type.groupby("Vch_Type")["Amount"].sum()
+    real_months = [m for m in months if m != marg_xml.NO_DATE]
+    m1, m2, m3, m4 = st.columns(4)
+    m1.metric("Months", len(real_months))
+    m2.metric("Vouchers", f"{int(by_type['Vouchers'].sum()):,}")
+    m3.metric("Sales", f"₹{type_totals.get('Sales', 0):,.0f}")
+    m4.metric("Purchase", f"₹{type_totals.get('Purchase', 0):,.0f}")
+    if real_months:
+        st.caption(f"Period covered: {real_months[0]} to {real_months[-1]}.")
+    if marg_xml.NO_DATE in months:
+        st.warning("Some vouchers have a date that could not be read; they "
+                   f"are grouped under “{marg_xml.NO_DATE}”.")
+
+    st.divider()
+    ui.step("Step 2 — Monthly summaries")
+    t_types, t_gst, t_ledger = st.tabs(
+        ["By voucher type", "GST by month", "Ledger monthly summary"])
+
+    with t_types:
+        st.caption("Total amount of each voucher type per month. A voucher's "
+                   "amount is the total of its credit side.")
+        amount = (by_type.pivot_table(index="Month", columns="Vch_Type",
+                                      values="Amount", aggfunc="sum",
+                                      fill_value=0, sort=False)
+                  .reindex(months))
+        count = (by_type.pivot_table(index="Month", columns="Vch_Type",
+                                     values="Vouchers", aggfunc="sum",
+                                     fill_value=0, sort=False)
+                 .reindex(months))
+        show = st.radio("Show", ["Amount", "Number of vouchers"],
+                        horizontal=True, key="marg_sum_show")
+        table = amount if show == "Amount" else count
+        total_row = table.sum().rename("Total")
+        st.dataframe(
+            pd.concat([table, total_row.to_frame().T]).style.format(
+                "{:,.2f}" if show == "Amount" else "{:,.0f}"),
+            use_container_width=True)
+        picked = st.multiselect(
+            "Chart", list(table.columns),
+            default=[c for c in ("Sales", "Purchase") if c in table.columns]
+            or list(table.columns)[:2], key="marg_sum_chart")
+        if picked:
+            chart = table[picked].copy()
+            # Keep calendar order on the axis (plain labels would sort A-Z).
+            chart.index = [f"{i + 1:02d} · {m}" for i, m in enumerate(chart.index)]
+            st.bar_chart(chart, stack=False)
+
+    with t_gst:
+        st.caption(
+            "Value and tax per month. Tax is what Marg posted to ledgers "
+            "with CGST, SGST or IGST in their name; Value is the rest of the "
+            "voucher total. Round off is shown separately and is part of "
+            "Value.")
+        gst = summaries["gst"]
+        kinds = list(gst["Vch_Type"].unique())
+        chosen_kind = st.selectbox(
+            "Voucher type", kinds,
+            index=kinds.index("Sales") if "Sales" in kinds else 0,
+            key="marg_sum_gst_type")
+        one = gst[gst["Vch_Type"] == chosen_kind].drop(columns="Vch_Type")
+        numeric = [c for c in one.columns if c != "Month"]
+        totals = one[numeric].sum()
+        totals["Month"] = "Total"
+        st.dataframe(
+            pd.concat([one, totals.to_frame().T], ignore_index=True)
+            .style.format({c: ("{:,.0f}" if c == "Vouchers" else "{:,.2f}")
+                           for c in numeric}),
+            use_container_width=True, hide_index=True)
+
+    with t_ledger:
+        st.caption(
+            "Debit and credit of one ledger for each month, as Tally shows "
+            "on its Ledger Monthly Summary screen."
+            + ("" if openings else " Upload the masters file in Step 1 to "
+               "add the opening and closing balance."))
+        ledger_rows = summaries["ledger"]
+        activity = (ledger_rows.assign(
+            Moved=ledger_rows["Debit"] + ledger_rows["Credit"])
+            .groupby("Ledger")["Moved"].sum().sort_values(ascending=False))
+        chosen_ledger = st.selectbox(
+            "Ledger", list(activity.index), key="marg_sum_ledger",
+            help="Listed with the most active ledgers first. Type to search.")
+        opening = openings.get(chosen_ledger) if openings else None
+        if openings and opening is None:
+            st.caption("This ledger is not in the masters file, so no "
+                       "opening balance is shown.")
+        statement = marg_xml.ledger_statement(summaries, chosen_ledger, opening)
+        l1, l2, l3, l4 = st.columns(4)
+        if opening is not None:
+            closing = opening + statement["Net"].sum()
+            l1.metric("Opening", f"{abs(opening):,.2f} "
+                                 f"{'Dr' if opening >= 0 else 'Cr'}")
+            l4.metric("Closing", f"{abs(closing):,.2f} "
+                                 f"{'Dr' if closing >= 0 else 'Cr'}")
+        l2.metric("Total debit", f"{statement['Debit'].sum():,.2f}")
+        l3.metric("Total credit", f"{statement['Credit'].sum():,.2f}")
+        st.dataframe(
+            statement.style.format({c: "{:,.2f}" for c in ("Debit", "Credit", "Net")}),
+            use_container_width=True, hide_index=True)
+
+    st.divider()
+    ui.step("Step 3 — Download")
+    st.download_button(
+        "⬇️ Download all summaries (Excel)",
+        data=marg_xml.summaries_workbook(summaries, openings),
+        file_name="Marg_Monthly_Summary.xlsx", mime=XLSX_MIME, type="primary")
+    st.caption("One sheet each for the month × voucher type table, vouchers "
+               "by month, GST by month and every ledger by month.")
+
+    with st.expander("🔎  Where to find the same figures in Tally.ERP 9"):
+        st.markdown(
+            """
+- **One ledger, month by month** — Gateway of Tally > **Display** >
+  **Account Books** > **Ledger**, then pick the ledger. Tally opens its
+  *Ledger Monthly Summary* with Debit, Credit and Closing Balance per month.
+- **Sales or purchases per month** — Gateway of Tally > **Display** >
+  **Account Books** > **Sales Register** (or **Purchase Register**).
+- **Every voucher of a period** — Gateway of Tally > **Display** >
+  **Day Book**, then **Alt + F2** to set the period.
+
+Set the same period in Tally (**Alt + F2**) as the months shown here.
+"""
+        )
+    st.caption(
+        "Figures are added up from Marg's file as it is. Vouchers that did "
+        "not import into Tally (see **Tally Import Errors**) will show up as "
+        "a difference.")
     st.stop()
 
 

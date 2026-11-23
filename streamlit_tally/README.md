@@ -28,6 +28,14 @@ Opens at http://localhost:8501. To share on your local network:
 streamlit run app.py --server.address 0.0.0.0
 ```
 
+### Windows shortcuts
+
+- `build.bat` — first-time setup: creates `.venv` and installs dependencies.
+- `start.bat` — starts the app.
+- `sync_and_restart.bat` — updates and (re)starts the app: closes it if it is
+  running, runs `git pull`, installs dependencies if `requirements.txt`
+  changed, then starts it. If the app is not running it just syncs and starts.
+
 ## What it does
 
 Each converter (Purchase/Sales, Payment/Contra/Receipt, and the three Master
@@ -61,6 +69,10 @@ There are also a few extra tools:
   default `C:\Program Files\Tally\Tally.ERP9\tally.imp`, or an uploaded copy)
   and lists each import newest first with its errors and a plain-language
   hint. Logic lives in `tally_log.py`.
+- **Marg Monthly Summary** — upload Marg's daybook XML (and optionally the
+  masters XML) to see month-by-month totals by voucher type, by GST, and for
+  any ledger with opening and closing balance, to compare with Tally after a
+  migration. Downloads as one Excel workbook. Logic lives in `marg_xml.py`.
 - **Consolidate Excel Files** — upload several workbooks; sheets with the same
   name are merged into one sheet. The header — single- or multi-row, detected
   as the top rows common to every file — is kept once and only the data rows

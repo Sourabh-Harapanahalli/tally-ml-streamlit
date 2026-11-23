@@ -723,3 +723,153 @@ def bundle_zip(books, xmls):
         for name, data in xmls.items():
             zf.writestr(f"XML/{name}", data)
     return buf.getvalue()
+
+
+# --------------------------------------------------------------------------
+# Monthly summaries — totals per month, for checking Marg against Tally.
+# --------------------------------------------------------------------------
+BY_TYPE_COLUMNS = ["Month", "Vch_Type", "Vouchers", "Amount"]
+GST_COLUMNS = ["Month", "Vch_Type", "Vouchers", "Value", "CGST", "SGST",
+               "IGST", "Round_Off", "Total"]
+LEDGER_MONTH_COLUMNS = ["Ledger", "Month", "Debit", "Credit"]
+NO_DATE = "No date"
+
+
+def _month_key(date_text):
+    """'17/04/2026' -> ('2026-04', 'Apr 2026'); unreadable -> ('9999-99', …)."""
+    m = re.fullmatch(r"(\d{2})/(\d{2})/(\d{4})", date_text or "")
+    if not m or not 1 <= int(m.group(2)) <= 12:
+        return "9999-99", NO_DATE
+    names = ("Jan Feb Mar Apr May Jun Jul Aug Sep Oct Nov Dec").split()
+    return f"{m.group(3)}-{m.group(2)}", f"{names[int(m.group(2)) - 1]} {m.group(3)}"
+
+
+def monthly_summaries(vouchers):
+    """Month-by-month totals of the daybook.
+
+    Returns a dict of DataFrames, each sorted by calendar month:
+
+    * ``by_type`` — vouchers and amount per month and voucher type. A
+      voucher's amount is the total of its credit lines (= its debit lines).
+    * ``gst`` — the same rows split into value, CGST, SGST, IGST and round
+      off. Tax is whatever Marg posted to ledgers with CGST / SGST / IGST in
+      their name; value is the remainder.
+    * ``ledger`` — debit and credit per ledger per month, as posted by Marg.
+    * ``months`` — the month labels in calendar order.
+    """
+    by_type, gst, ledger, order = Counter(), {}, {}, {}
+    for voucher in vouchers:
+        sort_key, month = _month_key(voucher["date"])
+        order[month] = sort_key
+        total = sum(a for _, a in voucher["entries"] if a > 0)
+        key = (month, voucher["type"])
+        by_type[key + ("n",)] += 1
+        by_type[key + ("amount",)] += total
+        parts = gst.setdefault(key, Counter())
+        parts["Vouchers"] += 1
+        parts["Total"] += total
+        for name, amount in voucher["entries"]:
+            slot = ledger.setdefault((name, month), [0.0, 0.0])
+            slot[0 if amount < 0 else 1] += abs(amount)
+            kind = _tax_kind(name)
+            if kind:
+                parts[kind] += abs(amount)
+            elif _is_round_off(name):
+                parts["Round_Off"] += abs(amount)
+
+    def sort_months(df):
+        if df.empty:
+            return df
+        return (df.assign(_k=df["Month"].map(order))
+                  .sort_values(["_k"] + [c for c in ("Vch_Type", "Ledger")
+                                         if c in df.columns], kind="stable")
+                  .drop(columns="_k").reset_index(drop=True))
+
+    type_rows = [{"Month": m, "Vch_Type": t, "Vouchers": by_type[(m, t, "n")],
+                  "Amount": round(by_type[(m, t, "amount")], 2)}
+                 for (m, t) in gst]
+    gst_rows = []
+    for (month, kind), parts in gst.items():
+        tax = parts["CGST"] + parts["SGST"] + parts["IGST"]
+        gst_rows.append({
+            "Month": month, "Vch_Type": kind, "Vouchers": parts["Vouchers"],
+            "Value": round(parts["Total"] - tax, 2),
+            "CGST": round(parts["CGST"], 2), "SGST": round(parts["SGST"], 2),
+            "IGST": round(parts["IGST"], 2),
+            "Round_Off": round(parts["Round_Off"], 2),
+            "Total": round(parts["Total"], 2)})
+    ledger_rows = [{"Ledger": name, "Month": month,
+                    "Debit": round(dr, 2), "Credit": round(cr, 2)}
+                   for (name, month), (dr, cr) in ledger.items()]
+    return {
+        "by_type": sort_months(pd.DataFrame(type_rows, columns=BY_TYPE_COLUMNS)),
+        "gst": sort_months(pd.DataFrame(gst_rows, columns=GST_COLUMNS)),
+        "ledger": sort_months(pd.DataFrame(ledger_rows,
+                                           columns=LEDGER_MONTH_COLUMNS)),
+        "months": sorted(order, key=order.get),
+    }
+
+
+def opening_balances(masters_xml_text):
+    """{ledger name: opening balance} from the masters file.
+
+    Positive = debit, negative = credit (Tally's XML stores it the other way
+    round, so the sign is flipped here to read naturally).
+    """
+    balances = {}
+    for raw_name, body in re.findall(
+            r'<LEDGER NAME="([^"]*)"[^>]*>(.*?)</LEDGER>', masters_xml_text, re.S):
+        balances[_text(raw_name)] = -_number(_tag(body, "OPENINGBALANCE"))
+    return balances
+
+
+def ledger_statement(summaries, ledger_name, opening=None):
+    """One ledger month by month: debit, credit, net and running balance.
+
+    ``Closing`` is filled only when ``opening`` is given; it is shown as an
+    amount with Dr or Cr. Months with no entries are included so the running
+    balance reads continuously.
+    """
+    rows = summaries["ledger"]
+    rows = rows[rows["Ledger"] == ledger_name].set_index("Month")
+    out, balance = [], opening
+    for month in summaries["months"]:
+        debit = float(rows["Debit"].get(month, 0.0))
+        credit = float(rows["Credit"].get(month, 0.0))
+        record = {"Month": month, "Debit": round(debit, 2),
+                  "Credit": round(credit, 2), "Net": round(debit - credit, 2)}
+        if opening is not None:
+            balance = round(balance + debit - credit, 2)
+            record["Closing"] = (f"{abs(balance):,.2f} "
+                                 f"{'Dr' if balance >= 0 else 'Cr'}")
+        out.append(record)
+    return pd.DataFrame(out)
+
+
+def summaries_workbook(summaries, openings=None):
+    """All monthly summaries as one .xlsx (bytes), one sheet per summary."""
+    month_type = summaries["by_type"].pivot_table(
+        index="Month", columns="Vch_Type", values="Amount", aggfunc="sum",
+        fill_value=0, sort=False).reindex(summaries["months"]).reset_index()
+    ledger = summaries["ledger"].copy()
+    ledger["Net"] = (ledger["Debit"] - ledger["Credit"]).round(2)
+    ledger = ledger.sort_values(
+        ["Ledger"], kind="stable").reset_index(drop=True)
+    buf = io.BytesIO()
+    with pd.ExcelWriter(buf, engine="openpyxl") as writer:
+        month_type.to_excel(writer, sheet_name="Month x Voucher type", index=False)
+        summaries["by_type"].to_excel(writer, sheet_name="Vouchers by month", index=False)
+        summaries["gst"].to_excel(writer, sheet_name="GST by month", index=False)
+        ledger.to_excel(writer, sheet_name="Ledgers by month", index=False)
+        if openings:
+            pd.DataFrame(
+                [{"Ledger": n, "Opening": abs(v), "Dr/Cr": "Dr" if v >= 0 else "Cr"}
+                 for n, v in sorted(openings.items())]
+            ).to_excel(writer, sheet_name="Opening balances", index=False)
+        for sheet in writer.sheets.values():
+            for column in sheet.columns:
+                width = max(len(str(c.value)) if c.value is not None else 0
+                            for c in column[:200])
+                sheet.column_dimensions[column[0].column_letter].width = min(
+                    max(12, width + 2), 48)
+    return buf.getvalue()
